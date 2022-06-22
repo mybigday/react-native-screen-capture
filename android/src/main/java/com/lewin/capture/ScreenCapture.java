@@ -45,7 +45,7 @@ public class ScreenCapture extends ReactContextBaseJavaModule {
 
     private ScreenCapturetListenManager manager;
 
-    private final static String path = "/screen-capture/";
+    private final static String prefix = "CAPTURE";
 
     public ScreenCapture(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -127,8 +127,7 @@ public class ScreenCapture extends ReactContextBaseJavaModule {
     public void clearCache(Promise promise) {
         WritableMap map = Arguments.createMap();
         try{
-            File file = new File(Environment.getExternalStorageDirectory() + path);
-            deleteFile(file);
+            deleteFile();
             map.putString("code", "200");
             promise.resolve(map);
         }catch (Exception ex) {
@@ -138,16 +137,12 @@ public class ScreenCapture extends ReactContextBaseJavaModule {
 
 
     }
-    private void deleteFile(File file) {
-        if (file.isDirectory()) {
-            File[] files = file.listFiles();
-            for (int i = 0; i < files.length; i++) {
-                File f = files[i];
-                deleteFile(f);
-            }
-            file.delete();//如要保留文件夹，只删除文件，请注释这行
-        } else if (file.exists()) {
-            file.delete();
+    private void deleteFile() {
+        File tempDir = getCurrentActivity().getCacheDir();
+        File[] files = tempDir.listFiles();
+        for (final File f : files) {
+            if (f.getName().startsWith(prefix))
+                f.delete();
         }
     }
 
@@ -232,18 +227,8 @@ public class ScreenCapture extends ReactContextBaseJavaModule {
      * @return 
      */
     private static String saveFile(Bitmap bitmap, String extension, int quality) throws Exception {
-        Calendar now = new GregorianCalendar();
-        SimpleDateFormat simpleDate = new SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault());
-        String fileName = Environment.getExternalStorageDirectory() + path + simpleDate.format(now.getTime()) + "." + extension;
-        File fileDir = new File(Environment.getExternalStorageDirectory() + path);
-        if(!fileDir.exists()) {
-            fileDir.mkdir();
-        }
-        File file = new File(fileName);
-        if(file.exists()) {
-            file.delete();
-        }
-        file.createNewFile();
+        File tempDir = getCurrentActivity().getCacheDir();
+        File file = File.createTempFile(prefix, "." + extension, tempDir);
         FileOutputStream out = new FileOutputStream(file);
         bitmap.compress(extToCompressFormat(extension), quality, out);
         out.flush();
