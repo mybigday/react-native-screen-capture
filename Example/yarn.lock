@@ -859,6 +859,9 @@
     exec-sh "^0.3.2"
     minimist "^1.2.0"
 
+"@fugood/react-native-screen-capture@../":
+  version "1.1.0"
+
 "@hapi/hoek@^9.0.0":
   version "9.2.0"
   resolved "http://verdaccio.doctopia.com.cn/@hapi%2fhoek/-/hoek-9.2.0.tgz#f3933a44e365864f4dad5db94158106d511e8131"
@@ -6077,9 +6080,6 @@ react-native-codegen@^0.0.6:
     flow-parser "^0.121.0"
     jscodeshift "^0.11.0"
     nullthrows "^1.1.1"
-
-react-native-lewin-screen-capture@../:
-  version "1.0.7"
 
 react-native@0.64.0:
   version "0.64.0"
