@@ -26,7 +26,7 @@
     "url": "https://github.com/LewinJun/react-native-lewin-screen-capture/issues"
   },
   "peerDependencies": {
-    "react-native": ">0.60.0"
+    "react-native": "*"
   },
   "homepage": "https://github.com/LewinJun/react-native-lewin-screen-capture#readme"
 }

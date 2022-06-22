@@ -9,7 +9,7 @@
 import React, {Component} from 'react';
 import {Platform, StyleSheet, Text, View, TouchableOpacity, Image} from 'react-native';
 
-import ScreenCaptureUtil from 'react-native-lewin-screen-capture'
+import ScreenCaptureUtil from '@fugood/react-native-screen-capture'
 
 const instructions = Platform.select({
   ios: 'Press Cmd+R to reload,\n' + 'Cmd+D or shake for dev menu',
@@ -22,7 +22,7 @@ type Props = {};
 export default class App extends Component<Props> {
 
   state = {
-    uri: 'http://c.hiphotos.baidu.com/image/h%3D300/sign=06f18776399b033b3388fada25cf3620/77c6a7efce1b9d162f210013fedeb48f8d5464da.jpg'
+    uri: 'https://fakeimg.pl/200x100/?retina=1&text=こんにちは&font=noto'
   }
 
   componentDidMount () {
@@ -53,7 +53,7 @@ export default class App extends Component<Props> {
           ScreenCaptureUtil.screenCapture((res)=>{
             console.log(res)
             this.setState({uri: res.uri})
-          })
+          }, false, {})
         }} activeOpacity = {0.6} style = {styles.btn}>
           <Text> 截取当前屏幕 </Text>
         </TouchableOpacity>

@@ -1,0 +1,35 @@
+require_relative '../node_modules/react-native/scripts/react_native_pods'
+require_relative '../node_modules/@react-native-community/cli-platform-ios/native_modules'
+
+source 'https://github.com/react-native-tvos/react-native-tvos-podspecs.git'
+source 'https://cdn.cocoapods.org/'
+
+target 'ReactNavigationTVDemo' do
+
+  platform :ios, '10.0'
+
+  config = use_native_modules!
+
+  use_react_native!(:path => config["reactNativePath"])
+
+  target 'ReactNavigationTVDemoTests' do
+    inherit! :complete
+    # Pods for testing
+  end
+
+end
+
+target 'ReactNavigationTVDemo-tvOS' do
+
+  platform :tvos, '12.0'
+
+  config = use_native_modules!
+
+  use_react_native!(:path => config["reactNativePath"])
+
+  target 'ReactNavigationTVDemo-tvOSTests' do
+    inherit! :complete
+    # Pods for testing
+  end
+
+end
