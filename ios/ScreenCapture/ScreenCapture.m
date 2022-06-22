@@ -69,7 +69,7 @@ RCT_EXPORT_METHOD(stopListener:(RCTPromiseResolveBlock)success failure:(RCTRespo
 RCT_EXPORT_METHOD(clearCache:(RCTPromiseResolveBlock)success failure:(RCTResponseErrorBlock)failure){
     dispatch_sync(dispatch_get_main_queue(), ^{
         @try{
-            NSArray *paths =NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES);
+            NSArray *paths =NSSearchPathForDirectoriesInDomains(NSCachesDirectory,NSUserDomainMask,YES);
             
             NSFileManager *fileManager = [NSFileManager defaultManager];
             NSString *path =[[paths objectAtIndex:0]stringByAppendingPathComponent:PATH];
@@ -138,7 +138,7 @@ RCT_EXPORT_METHOD(clearCache:(RCTPromiseResolveBlock)success failure:(RCTRespons
 - (NSDictionary*) screenImage:(BOOL)isHiddenStatus extension:(NSString*)extension quality:(NSNumber*)quality scale:(NSNumber*)scale {
     @try{
         UIImage *image = isHiddenStatus ? [self screenshotWithStatusBar:false] : [self screenshot];
-        NSArray *paths =NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES);
+        NSArray *paths =NSSearchPathForDirectoriesInDomains(NSCachesDirectory,NSUserDomainMask,YES);
         
         NSFileManager *fileManager = [NSFileManager defaultManager];
         NSString *path =[[paths objectAtIndex:0]stringByAppendingPathComponent:PATH];
