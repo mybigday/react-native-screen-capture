@@ -190,7 +190,7 @@ public class ScreenCapture extends ReactContextBaseJavaModule {
      * @param callback
      * @return
      */
-    public static void shotActivity(Activity context, final Boolean isHiddenStatus, final String extension, final int quality, final Double scale, final ResultCallback callback) {
+    public static void shotActivity(final Activity context, final Boolean isHiddenStatus, final String extension, final int quality, final Double scale, final ResultCallback callback) {
         CaptureCallback captureCallback = new CaptureCallback() {
             @Override
             public void invoke(@Nullable Bitmap bitmap) {
@@ -199,7 +199,7 @@ public class ScreenCapture extends ReactContextBaseJavaModule {
                     Bitmap outputBitmap = (scale.floatValue() > 0) ? resizeBitmap(bitmap, scale.floatValue()) : bitmap;
                     try {
                         map.putString("code", "200");
-                        map.putString("uri", "file://" + saveFile(outputBitmap, extension, quality));
+                        map.putString("uri", "file://" + saveFile(context, outputBitmap, extension, quality));
                         map.putString("base64", bitmapToBase64(outputBitmap, extension, quality));
                     } catch (Exception e) {
                         e.printStackTrace();
@@ -226,14 +226,14 @@ public class ScreenCapture extends ReactContextBaseJavaModule {
      * @param quality
      * @return 
      */
-    private static String saveFile(Bitmap bitmap, String extension, int quality) throws Exception {
-        File tempDir = getCurrentActivity().getCacheDir();
+    private static String saveFile(final Activity context, final Bitmap bitmap, final String extension, final int quality) throws Exception {
+        File tempDir = context.getCacheDir();
         File file = File.createTempFile(prefix, "." + extension, tempDir);
         FileOutputStream out = new FileOutputStream(file);
         bitmap.compress(extToCompressFormat(extension), quality, out);
         out.flush();
         out.close();
-        return fileName;
+        return file.getAbsolutePath();
     }
 
     /**
