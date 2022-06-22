@@ -53,7 +53,7 @@ export default class App extends Component<Props> {
           ScreenCaptureUtil.screenCapture((res)=>{
             console.log(res)
             this.setState({uri: res.uri})
-          }, false, {})
+          })
         }} activeOpacity = {0.6} style = {styles.btn}>
           <Text> 截取当前屏幕 </Text>
         </TouchableOpacity>

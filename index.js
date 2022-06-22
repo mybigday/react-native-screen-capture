@@ -68,7 +68,8 @@ export default class ScreenCaptureUtil  {
   /**
    * 截取当前屏幕方法
    */
-  static screenCapture = (callBack:((data:CALL_BBACK_PROPS) => void), isHiddenStatus, { extension = 'png', quality = 100, scale = 0 }) => {
+  static screenCapture = (callBack:((data:CALL_BBACK_PROPS) => void), isHiddenStatus, options) => {
+    const { extension = 'png', quality = 100, scale = 0 } = options || {}
     const ScreenCapture = NativeModules.ScreenCapture;
     if (isHiddenStatus === undefined || isHiddenStatus === null) {
       isHiddenStatus = Platform.OS === 'android'
