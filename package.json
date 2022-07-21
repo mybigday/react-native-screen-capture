@@ -1,6 +1,6 @@
 {
   "name": "@fugood/react-native-screen-capture",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "获取系统截屏事件与获取当前屏幕截屏",
   "main": "index.js",
   "scripts": {
