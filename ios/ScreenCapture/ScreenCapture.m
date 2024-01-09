@@ -34,7 +34,7 @@ RCT_EXPORT_METHOD(startListener:(RCTPromiseResolveBlock)success failure:(RCTResp
 }
 
 RCT_EXPORT_METHOD(screenCapture:(BOOL)isHiddenStatus extension:(nonnull NSString*)extension quality:(nonnull NSNumber*)quality scale:(nonnull NSNumber*)scale success:(RCTPromiseResolveBlock)success failure:(RCTResponseErrorBlock)failure){
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         @try{
             success([self screenImage: isHiddenStatus extension:extension quality:quality scale:scale]);
         }@catch(NSException *ex){
@@ -359,7 +359,7 @@ RCT_EXPORT_METHOD(clearCache:(RCTPromiseResolveBlock)success failure:(RCTRespons
             
             
             // Render the layer hierarchy to the current context
-            [[window layer] renderInContext:context];
+            [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:YES];
             
             // Restore the context
             CGContextRestoreGState(context);
