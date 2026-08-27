@@ -102,6 +102,39 @@ jobs:
 
           exit $fail
 
+  bundle:
+    name: JS bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: yarn
+
+      - name: Install library
+        run: yarn install --frozen-lockfile
+
+      - name: Install example
+        working-directory: example
+        run: yarn install --frozen-lockfile
+
+      # The Android job builds a *debug* APK, which loads JS from Metro and therefore never
+      # bundles anything -- a broken metro.config.js sails straight through it. Bundling for
+      # real is what proves Metro can still resolve the library from its TypeScript source.
+      - name: Bundle for Android
+        working-directory: example
+        run: |
+          npx react-native bundle --platform android --dev false \
+            --entry-file index.js --bundle-output /tmp/android.bundle --assets-dest /tmp/android-assets
+
+      - name: Bundle for iOS
+        working-directory: example
+        run: |
+          npx react-native bundle --platform ios --dev false \
+            --entry-file index.js --bundle-output /tmp/ios.bundle --assets-dest /tmp/ios-assets
+
   android:
     name: Android (${{ matrix.arch }} arch)
     runs-on: ubuntu-latest

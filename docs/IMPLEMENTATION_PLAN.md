@@ -245,6 +245,7 @@ so it stays verified.
 | --- | --- | --- |
 | `library` | ubuntu | `tsc --noEmit`, `bob build`, codegen runs |
 | `package` | ubuntu | `npm pack` and assert the tarball has what consumers need and nothing else |
+| `bundle` | ubuntu | `react-native bundle` for both platforms |
 | `android` (new / old arch) | ubuntu | builds the example APK, then asserts with `javap` that the **right** spec source set compiled |
 | `ios` (new / old arch) | macos-15 | `bundle exec pod install` + `xcodebuild` for the simulator |
 
@@ -282,5 +283,11 @@ environment — no macOS. The following need a real device before release:
 - [ ] iOS: same for react-native-video (`AVPlayerViewController` path)
 - [ ] iOS: `afterScreenUpdates: false` + `CATransaction.flush()` — does it pick up the placeholder?
 - [ ] iOS: IOSurface-direct `layer.contents` vs `CIContext` conversion timings
-- [ ] Android: overlay drawable really does cover the SurfaceView hole in the window readback
+- [x] **Android: overlay drawable really does cover the SurfaceView hole in the window readback.**
+      Confirmed on a Pixel 7 Pro (Android 17 / API 37), new architecture, release build, with a
+      react-native-video player on a `SurfaceView`. In the resulting 1080x2340 capture the video
+      region measured mean RGB (81, 96, 57) with 80.5% non-black pixels, against (28, 32, 41) and
+      0% for a control patch of app background -- a 3x green-channel ratio. The frame is in the
+      capture, not a black hole. `dumpHierarchy` also works on device (6ms), and the library's
+      `DETECT_SCREEN_CAPTURE` permission merges into the host app correctly.
 - [ ] Android: accessibility mode on API 30 and API 34
