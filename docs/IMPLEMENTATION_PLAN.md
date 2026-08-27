@@ -301,8 +301,19 @@ Gaps that remain: no ESLint gate (the repo has no root ESLint config), and no re
 Android library compiles locally (SDK 33–36 + JDK 17 present). iOS is **review-only** in this
 environment — no macOS. The following need a real device before release:
 
-- [ ] iOS: does the placeholder pass actually capture VisionCamera preview?
-- [ ] iOS: same for react-native-video (`AVPlayerViewController` path)
+- [~] **iOS: verified as far as a simulator can take it** (Xcode 26.6, iPhone 17 Pro sim, iOS 26.5).
+      Everything up to the final render is proven:
+      - discovery matches: `m=1/86`, `react_native_video.RCTVideo layer=CALayer <- AVPlayerLayer`.
+        Note react-native-video 6.19.2 uses `AVPlayerLayer`, not the `AVPlayerViewController`
+        seen on its master branch -- both rules exist, and the AVPlayerLayer one fired.
+      - the frame pipeline actually delivers: `hasFrame=YES`, `gravity=resizeAspect`
+      - `capture()` completes end to end, 1206x2622 in 272ms, no crash, view tree intact after
+      What a simulator **cannot** answer is the only thing left: whether `drawViewHierarchy`
+      picks up the placeholder on a real device. In the simulator it captures AVFoundation layers
+      natively, so the result looks identical either way. That needs the device.
+- [ ] iOS: the placeholder pass on a **real device** (blocked: the Mac's Apple Development
+      certificate expired 2025-01-08, and the login keychain is locked under SSH)
+- [ ] iOS: same for VisionCamera (`AVCaptureVideoPreviewLayer` path) -- untested entirely
 - [ ] iOS: `afterScreenUpdates: false` + `CATransaction.flush()` — does it pick up the placeholder?
 - [ ] iOS: IOSurface-direct `layer.contents` vs `CIContext` conversion timings
 - [x] **Android: overlay drawable really does cover the SurfaceView hole in the window readback.**

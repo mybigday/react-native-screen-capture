@@ -326,6 +326,25 @@ cd example && yarn
 yarn android            # or: yarn ios  (pod install first)
 ```
 
+`dumpHierarchy()` reports which media components were matched and, for each, whether its frame
+pipeline is actually delivering:
+
+```
+react_native_video.RCTVideo layer=CALayer  <- AVPlayerLayer, captured via AVPlayerItemVideoOutput
+
+FRAME PROVIDERS
+  player:0x10423ec50  hasFrame=YES  gravity=resizeAspect  target=RCTVideo
+```
+
+`hasFrame=no` means the component was found but its frames are not reachable — DRM being the
+usual cause.
+
+> **Xcode 26 note.** React Native 0.81 pins fmt 11.0.2, which does not compile under the Xcode 26
+> toolchain (`call to consteval function ... is not a constant expression` from
+> `Pods/fmt/include/fmt/format-inl.h`). This is upstream, not this package — it hits any RN 0.81
+> project. Until React Native bumps fmt, either build with Xcode 16, or force fmt's constexpr
+> path by defining `FMT_USE_CONSTEVAL=0` for the fmt pod.
+
 ## Migrating from 1.x
 
 The 1.x API still works but is deprecated and will be removed in 3.0.

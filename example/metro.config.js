@@ -25,6 +25,10 @@ const config = {
   watchFolders: [root],
   resolver: {
     blockList: new RegExp(`^(${blocked})$`),
+    // `lib` is blocked above, but package.json `exports` still points there, so without this
+    // Metro resolves the export, fails to find the file, and warns on every start. Preferring
+    // the `source` condition sends it to src/index.ts directly, which is what we want anyway.
+    unstable_conditionNames: ['source', 'react-native', 'require', 'import'],
     // Map the package name onto the repo root, and send everything else -- including the
     // @babel/runtime helpers Babel injects into the library's own source -- to the example's
     // node_modules, since the root's copy is blocked above.

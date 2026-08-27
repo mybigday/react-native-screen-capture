@@ -274,8 +274,29 @@ RCT_EXPORT_METHOD(dumpHierarchy:(RCTPromiseResolveBlock)resolve
                          reject:(RCTPromiseRejectBlock)reject)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        resolve([RNSCProviderRegistry.sharedRegistry
-            describeWindows:[RNSCWindowCapture captureWindows]]);
+        NSArray<UIWindow *> *windows = [RNSCWindowCapture captureWindows];
+        RNSCProviderRegistry *registry = RNSCProviderRegistry.sharedRegistry;
+        NSMutableString *out = [[registry describeWindows:windows] mutableCopy];
+
+        // Attaching is what tells us whether a matched component can actually hand over
+        // frames -- discovery finding a layer is not the same as the pipeline working.
+        NSArray<id<RNSCFrameProvider>> *providers = [registry attachedProvidersForWindows:windows];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [out appendString:@"\nFRAME PROVIDERS\n"];
+            if (providers.count == 0) {
+                [out appendString:@"  (none matched)\n"];
+            }
+            for (id<RNSCFrameProvider> provider in providers) {
+                [out appendFormat:@"  %@  hasFrame=%@  gravity=%@  target=%@\n",
+                    provider.identifier,
+                    provider.hasFrame ? @"YES" : @"no",
+                    provider.contentsGravity,
+                    NSStringFromClass(provider.targetView.class)];
+            }
+            [registry scheduleIdleDetach];
+            resolve(out);
+        });
     });
 }
 
