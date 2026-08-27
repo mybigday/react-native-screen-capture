@@ -191,6 +191,9 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           working-directory: example
+          # setup-ruby refuses to guess: without this (or a .ruby-version file) it errors out
+          # before the build even starts.
+          ruby-version: '3.3'
           bundler-cache: true
 
       - name: Cache CocoaPods
