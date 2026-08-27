@@ -1,32 +1,108 @@
 {
   "name": "@fugood/react-native-screen-capture",
-  "version": "1.2.3",
-  "description": "获取系统截屏事件与获取当前屏幕截屏",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "Programmatic screenshots for React Native, including video and camera components",
+  "main": "./lib/commonjs/index.js",
+  "module": "./lib/module/index.js",
+  "types": "./lib/typescript/commonjs/index.d.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "import": {
+        "types": "./lib/typescript/module/index.d.ts",
+        "default": "./lib/module/index.js"
+      },
+      "require": {
+        "types": "./lib/typescript/commonjs/index.d.ts",
+        "default": "./lib/commonjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "android/src",
+    "android/build.gradle",
+    "android/gradle.properties",
+    "ios",
+    "*.podspec",
+    "!ios/build",
+    "!android/build",
+    "!android/.gradle",
+    "!**/__tests__",
+    "!**/.*"
+  ],
   "scripts": {
-    "test": "react native 获取系统截屏事件与获取当前屏幕截屏",
-    "prepare": "rm -rf android/build Example/android/build Example/android/app/build node_modules Example/ios/build"
+    "build": "bob build",
+    "typecheck": "tsc --noEmit",
+    "prepare": "bob build"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LewinJun/react-native-lewin-screen-capture.git"
+    "url": "git+https://github.com/mybigday/react-native-screen-capture.git"
   },
   "keywords": [
-    "系统截屏事件",
-    "获取截屏事件",
-    "react",
-    "reactnative",
-    "截屏",
-    "capture",
-    "screencapture"
+    "react-native",
+    "screenshot",
+    "screen-capture",
+    "surfaceview",
+    "camera",
+    "video"
   ],
-  "author": "Lewin",
-  "license": "ISC",
+  "author": "Bricks Dev <dev@bricks.tools>",
+  "license": "MIT",
   "bugs": {
-    "url": "https://github.com/LewinJun/react-native-lewin-screen-capture/issues"
+    "url": "https://github.com/mybigday/react-native-screen-capture/issues"
   },
+  "homepage": "https://github.com/mybigday/react-native-screen-capture#readme",
   "peerDependencies": {
-    "react-native": "*"
+    "react": "*",
+    "react-native": ">=0.76.0"
   },
-  "homepage": "https://github.com/LewinJun/react-native-lewin-screen-capture#readme"
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "react": "19.1.0",
+    "react-native": "0.81.0",
+    "react-native-builder-bob": "^0.40.0",
+    "typescript": "^5.6.0"
+  },
+  "codegenConfig": {
+    "name": "RNScreenCaptureSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.lewin.capture"
+    },
+    "outputDir": {
+      "ios": "ios/generated",
+      "android": "android/generated"
+    }
+  },
+  "react-native-builder-bob": {
+    "source": "src",
+    "output": "lib",
+    "targets": [
+      [
+        "commonjs",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "module",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "typescript",
+        {
+          "project": "tsconfig.build.json"
+        }
+      ]
+    ]
+  }
 }

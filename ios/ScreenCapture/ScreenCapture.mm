@@ -1,0 +1,292 @@
+//
+//  ScreenCapture.mm
+//  ScreenCapture
+//
+
+#import "ScreenCapture.h"
+#import "RNSCWindowCapture.h"
+#import "RNSCProviderRegistry.h"
+
+#import <UIKit/UIKit.h>
+
+static NSString *const kCacheFolder = @"lewin-screen-capture";
+static NSString *const kEventScreenshot = @"ScreenCapture";
+static NSString *const kErrorCapture = @"E_CAPTURE";
+static NSString *const kErrorUnsupported = @"E_UNSUPPORTED";
+
+@implementation ScreenCapture {
+    BOOL _hasListeners;
+    BOOL _observingScreenshots;
+}
+
+RCT_EXPORT_MODULE()
+
++ (BOOL)requiresMainQueueSetup
+{
+    return NO;
+}
+
+- (NSArray<NSString *> *)supportedEvents
+{
+    return @[kEventScreenshot];
+}
+
+- (void)startObserving
+{
+    _hasListeners = YES;
+}
+
+- (void)stopObserving
+{
+    _hasListeners = NO;
+}
+
+- (void)invalidate
+{
+    [self stopScreenshotObserver];
+    [RNSCProviderRegistry.sharedRegistry detachAll];
+    [super invalidate];
+}
+
+#pragma mark - capture
+
+RCT_EXPORT_METHOD(capture:(NSDictionary *)options
+                  resolve:(RCTPromiseResolveBlock)resolve
+                   reject:(RCTPromiseRejectBlock)reject)
+{
+    NSString *mode = options[@"mode"] ?: @"view";
+    if (![mode isEqualToString:@"view"]) {
+        // `accessibility` is an Android-only mode. iOS has no equivalent: there is no public API
+        // that lets an app capture outside its own windows.
+        reject(kErrorUnsupported,
+               [NSString stringWithFormat:@"Capture mode '%@' is not available on iOS", mode],
+               nil);
+        return;
+    }
+
+    BOOL excludeStatusBar = [options[@"excludeStatusBar"] boolValue];
+    NSString *extension = options[@"extension"] ?: @"png";
+    CGFloat quality = options[@"quality"] ? [options[@"quality"] doubleValue] : 100.0;
+    CGFloat scale = options[@"scale"] ? [options[@"scale"] doubleValue] : 1.0;
+    BOOL includeBase64 = [options[@"includeBase64"] boolValue];
+
+    [RNSCWindowCapture captureExcludingStatusBar:excludeStatusBar
+                                      completion:^(UIImage *image, NSError *error) {
+        if (!image) {
+            reject(kErrorCapture, error.localizedDescription ?: @"Capture failed", error);
+            return;
+        }
+        // Scaling and encoding are pure pixel work; keep them off the main thread.
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            [self encodeImage:image
+                    extension:extension
+                      quality:quality
+                        scale:scale
+                includeBase64:includeBase64
+                      resolve:resolve
+                       reject:reject];
+        });
+    }];
+}
+
+- (void)encodeImage:(UIImage *)image
+          extension:(NSString *)extension
+            quality:(CGFloat)quality
+              scale:(CGFloat)scale
+      includeBase64:(BOOL)includeBase64
+            resolve:(RCTPromiseResolveBlock)resolve
+             reject:(RCTPromiseRejectBlock)reject
+{
+    @try {
+        UIImage *output = (scale > 0 && scale != 1.0) ? [self scaleImage:image by:scale] : image;
+
+        BOOL isJPEG = [extension isEqualToString:@"jpg"] || [extension isEqualToString:@"jpeg"];
+        NSData *data = isJPEG ? UIImageJPEGRepresentation(output, MAX(0.0, MIN(1.0, quality / 100.0)))
+                              : UIImagePNGRepresentation(output);
+        if (!data) {
+            reject(kErrorCapture, @"Could not encode the image", nil);
+            return;
+        }
+
+        NSString *path = [self writeData:data extension:isJPEG ? @"jpg" : @"png"];
+        if (!path) {
+            reject(kErrorCapture, @"Could not write the image to the cache directory", nil);
+            return;
+        }
+
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"uri"] = [@"file://" stringByAppendingString:path];
+        result[@"width"] = @(output.size.width * output.scale);
+        result[@"height"] = @(output.size.height * output.scale);
+        if (includeBase64) {
+            result[@"base64"] = [data base64EncodedStringWithOptions:0];
+        }
+        resolve(result);
+    } @catch (NSException *exception) {
+        reject(kErrorCapture, exception.reason ?: @"Capture failed", nil);
+    }
+}
+
+- (UIImage *)scaleImage:(UIImage *)image by:(CGFloat)scale
+{
+    CGSize size = CGSizeMake(image.size.width * scale, image.size.height * scale);
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = YES;
+    format.scale = image.scale;
+    UIGraphicsImageRenderer *renderer =
+        [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [image drawInRect:CGRectMake(0, 0, size.width, size.height)];
+    }];
+}
+
+- (nullable NSString *)writeData:(NSData *)data extension:(NSString *)extension
+{
+    NSString *folder = [self cacheFolder];
+    if (!folder) return nil;
+    NSString *name = [NSString stringWithFormat:@"CAPTURE-%@.%@", NSUUID.UUID.UUIDString, extension];
+    NSString *path = [folder stringByAppendingPathComponent:name];
+    return [data writeToFile:path atomically:YES] ? path : nil;
+}
+
+- (nullable NSString *)cacheFolder
+{
+    NSString *caches =
+        NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+    if (!caches) return nil;
+    NSString *folder = [caches stringByAppendingPathComponent:kCacheFolder];
+    NSFileManager *manager = NSFileManager.defaultManager;
+    if (![manager fileExistsAtPath:folder]) {
+        [manager createDirectoryAtPath:folder
+           withIntermediateDirectories:YES
+                            attributes:nil
+                                 error:NULL];
+    }
+    return folder;
+}
+
+#pragma mark - modes and permissions
+
+RCT_EXPORT_METHOD(getPermissionStatus:(NSString *)mode
+                              resolve:(RCTPromiseResolveBlock)resolve
+                               reject:(RCTPromiseRejectBlock)reject)
+{
+    resolve([mode isEqualToString:@"view"] ? @"granted" : @"unavailable");
+}
+
+RCT_EXPORT_METHOD(requestPermission:(NSString *)mode
+                            resolve:(RCTPromiseResolveBlock)resolve
+                             reject:(RCTPromiseRejectBlock)reject)
+{
+    resolve([mode isEqualToString:@"view"] ? @"granted" : @"unavailable");
+}
+
+RCT_EXPORT_METHOD(openAccessibilitySettings:(RCTPromiseResolveBlock)resolve
+                                     reject:(RCTPromiseRejectBlock)reject)
+{
+    resolve(@NO);
+}
+
+RCT_EXPORT_METHOD(isModeAvailable:(NSString *)mode
+                          resolve:(RCTPromiseResolveBlock)resolve
+                           reject:(RCTPromiseRejectBlock)reject)
+{
+    resolve(@([mode isEqualToString:@"view"]));
+}
+
+#pragma mark - frame providers
+
+RCT_EXPORT_METHOD(warmUp:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [RNSCProviderRegistry.sharedRegistry
+            attachedProvidersForWindows:[RNSCWindowCapture captureWindows]];
+        resolve(nil);
+    });
+}
+
+RCT_EXPORT_METHOD(coolDown:(RCTPromiseResolveBlock)resolve
+                    reject:(RCTPromiseRejectBlock)reject)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [RNSCProviderRegistry.sharedRegistry detachAll];
+        resolve(nil);
+    });
+}
+
+#pragma mark - misc
+
+RCT_EXPORT_METHOD(clearCache:(RCTPromiseResolveBlock)resolve
+                      reject:(RCTPromiseRejectBlock)reject)
+{
+    NSString *folder = [self cacheFolder];
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSUInteger removed = 0;
+    if (folder) {
+        NSArray<NSString *> *names = [manager contentsOfDirectoryAtPath:folder error:NULL];
+        for (NSString *name in names) {
+            NSString *path = [folder stringByAppendingPathComponent:name];
+            if ([manager removeItemAtPath:path error:NULL]) removed++;
+        }
+    }
+    resolve(@(removed));
+}
+
+RCT_EXPORT_METHOD(startScreenshotDetection:(RCTPromiseResolveBlock)resolve
+                                    reject:(RCTPromiseRejectBlock)reject)
+{
+    if (!_observingScreenshots) {
+        [NSNotificationCenter.defaultCenter
+            addObserver:self
+               selector:@selector(userDidTakeScreenshot:)
+                   name:UIApplicationUserDidTakeScreenshotNotification
+                 object:nil];
+        _observingScreenshots = YES;
+    }
+    resolve(nil);
+}
+
+RCT_EXPORT_METHOD(stopScreenshotDetection:(RCTPromiseResolveBlock)resolve
+                                   reject:(RCTPromiseRejectBlock)reject)
+{
+    [self stopScreenshotObserver];
+    resolve(nil);
+}
+
+- (void)stopScreenshotObserver
+{
+    if (!_observingScreenshots) return;
+    [NSNotificationCenter.defaultCenter
+        removeObserver:self
+                  name:UIApplicationUserDidTakeScreenshotNotification
+                object:nil];
+    _observingScreenshots = NO;
+}
+
+- (void)userDidTakeScreenshot:(NSNotification *)notification
+{
+    // iOS never hands over the user's screenshot file, only the fact that one was taken.
+    if (_hasListeners) [self sendEventWithName:kEventScreenshot body:@{}];
+}
+
+RCT_EXPORT_METHOD(dumpHierarchy:(RCTPromiseResolveBlock)resolve
+                         reject:(RCTPromiseRejectBlock)reject)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        resolve([RNSCProviderRegistry.sharedRegistry
+            describeWindows:[RNSCWindowCapture captureWindows]]);
+    });
+}
+
+#pragma mark - TurboModule
+
+#ifdef RCT_NEW_ARCH_ENABLED
+- (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
+    (const facebook::react::ObjCTurboModule::InitParams &)params
+{
+    return std::make_shared<facebook::react::NativeScreenCaptureSpecJSI>(params);
+}
+#endif
+
+@end

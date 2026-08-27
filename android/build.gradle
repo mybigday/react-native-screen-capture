@@ -1,63 +1,64 @@
-
-import groovy.json.JsonSlurper
+// Deliberately no buildscript block: the Android Gradle Plugin and the React Native Gradle
+// Plugin are already on the root project's classpath. Pinning a version here fights with
+// whatever the host app resolves, which is the app author's call, not ours.
 
 def safeExtGet(prop, fallback) {
-    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+  rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
 }
 
-def computeVersionName() {
-    // dynamically retrieve version from package.json
-    def slurper = new JsonSlurper()
-    def json = slurper.parse(file('../package.json'), "utf-8")
-    return json.version
+def isNewArchitectureEnabled() {
+  return project.hasProperty("newArchEnabled") && project.newArchEnabled == "true"
 }
 
-buildscript {
-    repositories {
-        jcenter()
-        maven {
-            url 'https://maven.google.com/'
-            name 'Google'
-        }
-    }
-
-    dependencies {
-        classpath 'com.android.tools.build:gradle:3.1.4'
-    }
+apply plugin: "com.android.library"
+if (isNewArchitectureEnabled()) {
+  apply plugin: "com.facebook.react"
 }
-
-apply plugin: 'com.android.library'
 
 android {
-    compileSdkVersion safeExtGet('compileSdkVersion', 29)
-    buildToolsVersion safeExtGet('buildToolsVersion', '29.0.2')
+  namespace "com.lewin.capture"
 
-    defaultConfig {
-        minSdkVersion safeExtGet('minSdkVersion', 16)
-        targetSdkVersion safeExtGet('targetSdkVersion', 29)
-        versionCode 1
-        versionName computeVersionName()
+  compileSdk safeExtGet("compileSdkVersion", 36)
+
+  defaultConfig {
+    // PixelCopy.request(Window, ...) is API 26; API 24-25 falls back to a Canvas draw.
+    minSdk safeExtGet("minSdkVersion", 24)
+    targetSdk safeExtGet("targetSdkVersion", 36)
+    consumerProguardFiles "consumer-rules.pro"
+    buildConfigField "boolean", "IS_NEW_ARCHITECTURE_ENABLED", isNewArchitectureEnabled().toString()
+  }
+
+  buildFeatures {
+    buildConfig true
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  sourceSets {
+    main {
+      if (isNewArchitectureEnabled()) {
+        java.srcDirs += ["src/newarch/java"]
+      } else {
+        java.srcDirs += ["src/oldarch/java"]
+      }
     }
-    lintOptions {
-        abortOnError false
-    }
+  }
+
+  lint {
+    abortOnError false
+  }
 }
 
 repositories {
-    mavenCentral()
-     maven {
-        url "$projectDir/../Example/node_modules/react-native/android"
-    }
-    maven {
-        url "$projectDir/../../react-native/android"
-    }
-    maven {
-        url 'https://maven.google.com/'
-        name 'Google'
-    }
+  google()
+  mavenCentral()
 }
 
 dependencies {
-    implementation 'com.facebook.react:react-native:+'
-    implementation 'com.google.zxing:core:3.3.2'
+  // Version is supplied by the host app's React Native gradle plugin.
+  //noinspection GradleDynamicVersion
+  implementation "com.facebook.react:react-android"
 }

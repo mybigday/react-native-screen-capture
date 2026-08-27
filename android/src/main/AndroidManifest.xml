@@ -1,6 +1,15 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.lewin.capture">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+    <!-- Needed by Activity#registerScreenCaptureCallback (API 34+) for screenshot detection.
+         Harmless when unused: it grants no access to anything, it only lets the app be told
+         that the user pressed the screenshot combo. -->
+    <uses-permission android:name="android.permission.DETECT_SCREEN_CAPTURE" />
+
+    <!--
+      The accessibility service is intentionally NOT declared here. Declaring it would merge an
+      accessibility service into every consumer app and subject all of them to Google Play's
+      Accessibility API policy. Apps that want `accessibility` mode declare it themselves; see
+      the README.
+    -->
 
 </manifest>
