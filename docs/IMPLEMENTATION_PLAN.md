@@ -236,6 +236,28 @@ drives the mode selector, the accessibility permission flow, screenshot detectio
 Building it is also the strongest verification available in this environment: it compiles the
 library through the real React Native Gradle Plugin with codegen, on the new architecture.
 
+## 10b. Measured on device
+
+Pixel 7 Pro, 1080x2340, end to end from the JS call to the resolved promise:
+
+| | time |
+| --- | --- |
+| PNG full resolution, `view` | 513 / 451 / 471 ms |
+| PNG full resolution, `accessibility` | 479 / 478 / 497 ms |
+| JPEG q80 `scale: 0.5`, `view` | 63 / 50 / 69 ms |
+
+Two things follow. The capture mode is not the lever -- the two modes land within noise of each
+other once the hardware-to-software copy is off the main thread. And PNG encoding of a
+full-resolution phone screen costs ~8x everything else put together.
+
+`PixelCopy.request(Window, ...)` was also confirmed empirically **not** to include `SurfaceView`
+content, by temporarily disabling the overlay path and re-capturing: the video region came back
+at mean RGB (27.8, 31.8, 40.7) with 0.0% non-black -- exactly the app background colour, i.e. an
+empty hole -- against (81.3, 96.0, 57.3) and 80.5% with the overlay in place. This matches the
+AOSP source, where the `Window` overload resolves to `sourceForWindow()` (the ViewRootImpl
+surface) while the `SurfaceView` overload resolves to `getHolder().getSurface()`: two separate
+surfaces, combined only by SurfaceFlinger at display time.
+
 ## 11. CI
 
 `.github/workflows/ci.yml` runs everything that was verified by hand while building this,

@@ -299,7 +299,21 @@ and can fail outright on some presets; borrowing disturbs nothing. Exactly one p
 retained at a time, so your camera package's buffer pool is never starved.
 
 **Android.** All `SurfaceView` copies are issued in parallel and the window is read back once.
-Encoding happens off the UI thread.
+Encoding happens off the UI thread, as does the hardware-to-software bitmap copy that
+`accessibility` mode needs.
+
+**Encoding dominates, not the capture.** Measured on a Pixel 7 Pro (1080x2340), end to end from
+the JS call to the resolved promise:
+
+| | time |
+| --- | --- |
+| PNG, full resolution | ~480ms |
+| JPEG quality 80, `scale: 0.5` | ~60ms |
+| `view` vs `accessibility` mode, same settings | within noise of each other |
+
+If capture latency matters, change the format and the scale. The capture mode is worth about 1%
+of the total and is not the lever. PNG is lossless and the default for that reason, but a
+full-resolution PNG of a phone screen is a genuinely expensive thing to produce.
 
 ## Example app
 

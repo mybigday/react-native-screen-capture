@@ -14,6 +14,10 @@ import android.text.TextUtils;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 
@@ -34,6 +38,18 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
     }
 
     private static final int RETRY_DELAY_MS = 400;
+
+    /**
+     * The screenshot callback copies a full-screen bitmap out of the hardware buffer. Running
+     * that on the main executor would do a 1080x2340-sized copy on the UI thread.
+     */
+    private static final Executor CAPTURE_EXECUTOR = Executors.newSingleThreadExecutor(
+        new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable runnable) {
+                return new Thread(runnable, "rn-screen-capture-a11y");
+            }
+        });
 
     @Nullable
     private static volatile ScreenCaptureAccessibilityService instance;
@@ -111,31 +127,33 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                                        final Callback callback, final int retriesLeft) {
         service.takeScreenshot(
             Display.DEFAULT_DISPLAY,
-            service.getMainExecutor(),
+            CAPTURE_EXECUTOR,
             new AccessibilityService.TakeScreenshotCallback() {
                 @Override
                 public void onSuccess(AccessibilityService.ScreenshotResult result) {
+                    Bitmap bitmap = null;
+                    String error = null;
                     HardwareBuffer buffer = result.getHardwareBuffer();
                     try {
                         Bitmap hardware = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
                         if (hardware == null) {
-                            callback.onResult(null, "Could not wrap the screenshot buffer");
-                            return;
+                            error = "Could not wrap the screenshot buffer";
+                        } else {
+                            // The hardware bitmap dies with the buffer and cannot be scaled or
+                            // re-encoded, so it has to be copied out before the buffer closes.
+                            bitmap = hardware.copy(Bitmap.Config.ARGB_8888, false);
+                            hardware.recycle();
+                            if (bitmap == null) error = "Could not copy the screenshot buffer";
                         }
-                        // Copy into a software bitmap: the hardware one dies with the buffer and
-                        // cannot be scaled or re-encoded.
-                        Bitmap software = hardware.copy(Bitmap.Config.ARGB_8888, false);
-                        hardware.recycle();
-                        if (software == null) {
-                            callback.onResult(null, "Could not copy the screenshot buffer");
-                            return;
-                        }
-                        callback.onResult(software, null);
                     } catch (Throwable t) {
-                        callback.onResult(null, String.valueOf(t.getMessage()));
+                        error = String.valueOf(t.getMessage());
                     } finally {
                         buffer.close();
                     }
+                    // Deliberately outside the guarded block. The callback settles a Promise;
+                    // if something downstream threw, the catch above would settle it a second
+                    // time, which is a worse failure than letting the throw propagate.
+                    callback.onResult(bitmap, error);
                 }
 
                 @Override
