@@ -25,10 +25,14 @@ const config = {
   watchFolders: [root],
   resolver: {
     blockList: new RegExp(`^(${blocked})$`),
-    // `lib` is blocked above, but package.json `exports` still points there, so without this
-    // Metro resolves the export, fails to find the file, and warns on every start. Preferring
-    // the `source` condition sends it to src/index.ts directly, which is what we want anyway.
-    unstable_conditionNames: ['source', 'react-native', 'require', 'import'],
+    // Metro warns on every start that the `exports` target under `lib` does not exist -- it is
+    // blocked just above -- and then falls back to file-based resolution, which lands on `src`.
+    // The warning is noise; the resolution is correct.
+    //
+    // Do NOT "fix" it with `unstable_conditionNames: ['source', ...]`. That condition list is
+    // global, so it changes resolution for every package, not just this one, and it breaks the
+    // app at startup with `[runtime not ready] TypeError: ... is not a function`. Confirmed on
+    // an iPhone: reverting this line is what made the app boot again.
     // Map the package name onto the repo root, and send everything else -- including the
     // @babel/runtime helpers Babel injects into the library's own source -- to the example's
     // node_modules, since the root's copy is blocked above.

@@ -311,9 +311,28 @@ environment — no macOS. The following need a real device before release:
       What a simulator **cannot** answer is the only thing left: whether `drawViewHierarchy`
       picks up the placeholder on a real device. In the simulator it captures AVFoundation layers
       natively, so the result looks identical either way. That needs the device.
-- [ ] iOS: the placeholder pass on a **real device** (blocked: the Mac's Apple Development
-      certificate expired 2025-01-08, and the login keychain is locked under SSH)
-- [ ] iOS: same for VisionCamera (`AVCaptureVideoPreviewLayer` path) -- untested entirely
+- [x] **iOS on a real device (iPhone XR, iOS 18.7.9) -- and the result contradicts the premise
+      this design was built on.** Captured twice back to back, once with the placeholder pass and
+      once with it skipped behind a temporary debug flag, then pulled both PNGs off the device:
+
+      | | video region | non-black |
+      | --- | --- | --- |
+      | with placeholder | mean RGB (66.0, 81.0, 55.3) | 67.0% |
+      | placeholder skipped | mean RGB (66.3, 81.1, 55.5) | 67.4% |
+
+      Identical. The provider was genuinely live at the time (`hasFrame=YES` on device), so the
+      placeholder really was installed in the first capture -- and the video shows up without it
+      just the same. **`drawViewHierarchyInRect:afterScreenUpdates:YES` captures AVPlayerLayer
+      content natively on iOS 18.7.** For this case the placeholder machinery is redundant.
+
+      Scope of that claim, before acting on it: it covers non-DRM video in an `AVPlayerLayer` on
+      iOS 18.7 only. It says nothing about `AVCaptureVideoPreviewLayer`, which is where the
+      black-frame reports are most consistent, nor about older iOS versions, nor about
+      `AVSampleBufferDisplayLayer`.
+- [ ] **iOS: VisionCamera (`AVCaptureVideoPreviewLayer`) -- untested, and now the deciding
+      question.** If drawViewHierarchy also handles camera preview, the whole iOS provider stack
+      is unnecessary complexity paying a real decoder/capture cost, and should be deleted. If it
+      does not, the stack earns its place and this is simply a case where it was not needed.
 - [ ] iOS: `afterScreenUpdates: false` + `CATransaction.flush()` — does it pick up the placeholder?
 - [ ] iOS: IOSurface-direct `layer.contents` vs `CIContext` conversion timings
 - [x] **Android: overlay drawable really does cover the SurfaceView hole in the window readback.**
