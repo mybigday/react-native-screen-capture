@@ -235,7 +235,34 @@ drives the mode selector, the accessibility permission flow, screenshot detectio
 Building it is also the strongest verification available in this environment: it compiles the
 library through the real React Native Gradle Plugin with codegen, on the new architecture.
 
-## 11. Verification
+## 11. CI
+
+`.github/workflows/ci.yml` runs everything that was verified by hand while building this,
+so it stays verified.
+
+| Job | Runner | Guards |
+| --- | --- | --- |
+| `library` | ubuntu | `tsc --noEmit`, `bob build`, codegen runs |
+| `package` | ubuntu | `npm pack` and assert the tarball has what consumers need and nothing else |
+| `android` (new / old arch) | ubuntu | builds the example APK, then asserts with `javap` that the **right** spec source set compiled |
+| `ios` (new / old arch) | macos-15 | `bundle exec pod install` + `xcodebuild` for the simulator |
+
+Two of these earn their keep immediately:
+
+- **`ios` is the only place the Objective-C is ever compiled.** None of it has been built on
+  this branch; the macOS job is what will first tell us whether it is even syntactically sound.
+- **`package` caught a real bug the moment it was written**: `ios/generated/` (local codegen
+  output) was being published in the npm tarball, because `files` listed `"ios"` and the
+  `!ios/build` negation did not cover it. Narrowed `files` to `ios/ScreenCapture`.
+
+The Android job does not just check that Gradle succeeds. The `newarch` / `oldarch` source-set
+swap is the kind of wiring that fails silently -- Gradle will happily build the wrong one -- so
+the job asserts on the compiled `ScreenCaptureSpec` superclass and on the presence of the
+codegen output.
+
+There is no ESLint gate: the repo has no root ESLint config, and adding one is separate work.
+
+## 12. Verification
 
 Android library compiles locally (SDK 33–36 + JDK 17 present). iOS is **review-only** in this
 environment — no macOS. The following need a real device before release:

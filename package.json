@@ -27,11 +27,9 @@
     "android/src",
     "android/build.gradle",
     "android/gradle.properties",
-    "ios",
+    "android/consumer-rules.pro",
+    "ios/ScreenCapture",
     "*.podspec",
-    "!ios/build",
-    "!android/build",
-    "!android/.gradle",
     "!**/__tests__",
     "!**/.*"
   ],

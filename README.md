@@ -1,5 +1,7 @@
 # @fugood/react-native-screen-capture
 
+[![CI](https://github.com/mybigday/react-native-screen-capture/actions/workflows/ci.yml/badge.svg)](https://github.com/mybigday/react-native-screen-capture/actions/workflows/ci.yml)
+
 Programmatic screenshots for React Native — including the parts that normally come out black.
 
 Video players and camera previews are composited by the GPU, not by the drawing APIs a normal

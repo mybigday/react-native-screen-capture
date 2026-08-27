@@ -1,0 +1,221 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A new push supersedes whatever is still running for the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  JAVA_VERSION: '17'
+
+jobs:
+  library:
+    name: Typecheck and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: yarn
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      - name: Typecheck
+        run: yarn typecheck
+
+      - name: Build package
+        run: yarn build
+
+      - name: Run codegen
+        # Guards the spec: if a signature drifts away from what the native modules implement,
+        # codegen still succeeds but the Android/iOS jobs below fail to compile.
+        run: npx bob build --target codegen
+
+  package:
+    name: Package contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: yarn
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      - name: Pack
+        run: npm pack --pack-destination /tmp
+
+      - name: Check the tarball has what consumers need, and nothing they do not
+        run: |
+          set -euo pipefail
+          tar -tzf /tmp/*.tgz | sed 's|^package/||' | sort > /tmp/files.txt
+          echo "::group::Tarball contents"
+          cat /tmp/files.txt
+          echo "::endgroup::"
+
+          fail=0
+          require() {
+            if ! grep -qx "$1" /tmp/files.txt; then
+              echo "::error::missing from the published package: $1"
+              fail=1
+            fi
+          }
+          forbid() {
+            if grep -qE "$1" /tmp/files.txt; then
+              echo "::error::should not be published: $(grep -E "$1" /tmp/files.txt | head -5)"
+              fail=1
+            fi
+          }
+
+          require "lib/commonjs/index.js"
+          require "lib/module/index.js"
+          require "lib/typescript/commonjs/index.d.ts"
+          require "src/index.ts"
+          require "src/NativeScreenCapture.ts"
+          require "android/build.gradle"
+          require "android/src/main/java/com/lewin/capture/ScreenCaptureModule.java"
+          require "android/src/newarch/java/com/lewin/capture/ScreenCaptureSpec.java"
+          require "android/src/oldarch/java/com/lewin/capture/ScreenCaptureSpec.java"
+          require "android/src/main/res/xml/screen_capture_accessibility_service.xml"
+          require "ios/ScreenCapture/ScreenCapture.mm"
+          require "react-native-screen-capture.podspec"
+
+          forbid "^example/"
+          forbid "^docs/"
+          forbid "node_modules/"
+          forbid "^(android|ios)/build/"
+          forbid "^(android|ios)/generated/"
+
+          exit $fail
+
+  android:
+    name: Android (${{ matrix.arch }} arch)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: new
+            newArchEnabled: 'true'
+          - arch: old
+            newArchEnabled: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: yarn
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install library
+        run: yarn install --frozen-lockfile
+
+      - name: Install example
+        working-directory: example
+        run: yarn install --frozen-lockfile
+
+      - name: Build debug APK
+        working-directory: example/android
+        run: ./gradlew assembleDebug -PnewArchEnabled=${{ matrix.newArchEnabled }} --no-daemon
+
+      - name: Verify the right spec source set compiled
+        # The library swaps src/newarch and src/oldarch behind newArchEnabled. If that wiring
+        # breaks, Gradle happily builds the wrong one, so assert on the compiled class.
+        run: |
+          set -euo pipefail
+          CLASSES=android/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes
+          SUPER=$(javap -cp "$CLASSES" com.lewin.capture.ScreenCaptureSpec | grep 'abstract class')
+          echo "$SUPER"
+          if [ "${{ matrix.newArchEnabled }}" = "true" ]; then
+            echo "$SUPER" | grep -q 'extends com.lewin.capture.NativeScreenCaptureSpec' \
+              || { echo "::error::expected the codegen spec on the new architecture"; exit 1; }
+            test -f android/build/generated/source/codegen/java/com/lewin/capture/NativeScreenCaptureSpec.java \
+              || { echo "::error::codegen did not emit the Java spec"; exit 1; }
+          else
+            echo "$SUPER" | grep -q 'extends com.facebook.react.bridge.ReactContextBaseJavaModule' \
+              || { echo "::error::expected the old-architecture spec"; exit 1; }
+          fi
+
+  ios:
+    name: iOS (${{ matrix.arch }} arch)
+    # macOS minutes are billed at a multiple of Linux. This matrix is still worth it: the
+    # Objective-C is only ever compiled here, and the two architectures take different
+    # code paths through ScreenCapture.mm.
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: new
+            newArch: '1'
+          - arch: old
+            newArch: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: yarn
+
+      - name: Install library
+        run: yarn install --frozen-lockfile
+
+      - name: Install example
+        working-directory: example
+        run: yarn install --frozen-lockfile
+
+      - name: Set up Ruby
+        # The example's Gemfile pins CocoaPods and xcodeproj away from versions known to break
+        # React Native builds, so go through bundler rather than the runner's system pods.
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: example
+          bundler-cache: true
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: example/ios/Pods
+          key: pods-${{ matrix.arch }}-${{ hashFiles('example/ios/Podfile.lock', 'example/yarn.lock', '*.podspec') }}
+          restore-keys: pods-${{ matrix.arch }}-
+
+      - name: Pod install
+        working-directory: example/ios
+        env:
+          RCT_NEW_ARCH_ENABLED: ${{ matrix.newArch }}
+        run: bundle exec pod install
+
+      - name: Build
+        working-directory: example/ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace ScreenCaptureExample.xcworkspace \
+            -scheme ScreenCaptureExample \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -quiet \
+            CODE_SIGNING_ALLOWED=NO \
+            build
