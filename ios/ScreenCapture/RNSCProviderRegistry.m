@@ -120,6 +120,7 @@ static const NSTimeInterval kIdleDetachDelay = 3.0;
              forView:(UIView *)view
                 into:(NSMutableArray<id<RNSCFrameProvider>> *)found
 {
+#if !TARGET_OS_TV
     if ([layer isKindOfClass:AVCaptureVideoPreviewLayer.class]) {
         AVCaptureVideoPreviewLayer *preview = (AVCaptureVideoPreviewLayer *)layer;
         if (preview.session) {
@@ -129,7 +130,9 @@ static const NSTimeInterval kIdleDetachDelay = 3.0;
                 return [[RNSCCameraFrameProvider alloc] initWithPreviewLayer:preview targetView:view];
             }];
         }
-    } else if ([layer isKindOfClass:AVPlayerLayer.class]) {
+    } else
+#endif
+    if ([layer isKindOfClass:AVPlayerLayer.class]) {
         AVPlayerLayer *playerLayer = (AVPlayerLayer *)layer;
         if (playerLayer.player) {
             [self addProviderWithIdentifier:[NSString stringWithFormat:@"player:%p", playerLayer.player]
@@ -201,9 +204,12 @@ static const NSTimeInterval kIdleDetachDelay = 3.0;
 
 - (void)describeMediaLayersIn:(CALayer *)layer into:(NSMutableString *)out
 {
+#if !TARGET_OS_TV
     if ([layer isKindOfClass:AVCaptureVideoPreviewLayer.class]) {
         [out appendString:@"  <- AVCaptureVideoPreviewLayer, captured via AVCaptureVideoDataOutput"];
-    } else if ([layer isKindOfClass:AVPlayerLayer.class]) {
+    } else
+#endif
+    if ([layer isKindOfClass:AVPlayerLayer.class]) {
         [out appendString:@"  <- AVPlayerLayer, captured via AVPlayerItemVideoOutput"];
     } else if ([NSStringFromClass(layer.class) containsString:@"AVSampleBufferDisplayLayer"]) {
         [out appendString:@"  <- AVSampleBufferDisplayLayer, NOT captured yet"];

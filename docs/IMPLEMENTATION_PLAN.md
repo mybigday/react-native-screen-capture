@@ -261,7 +261,17 @@ swap is the kind of wiring that fails silently -- Gradle will happily build the 
 the job asserts on the compiled `ScreenCaptureSpec` superclass and on the presence of the
 codegen output.
 
-There is no ESLint gate: the repo has no root ESLint config, and adding one is separate work.
+The iOS job also runs a **tvOS syntax check**. The podspec claims tvOS support (it always has,
+and the old example was a react-native-tvos app), but the example has no tvOS target, so
+`xcodebuild` cannot cover it. `AVCaptureSession` and `AVCaptureVideoPreviewLayer` are
+`API_UNAVAILABLE(tvos)`, so the camera provider would not have compiled there at all -- shipped
+broken, invisibly, because CI only built the iOS simulator. The five `RNSC*.m` sources depend
+only on UIKit/AVFoundation, so clang can parse them against the tvOS SDK directly, which is
+enough to catch that class of mistake. The camera provider is now behind `#if !TARGET_OS_TV`;
+video capture still works on tvOS through `AVPlayerLayer`.
+
+Gaps that remain: no ESLint gate (the repo has no root ESLint config), and no real tvOS *build*
+-- adding a tvOS target to the example would close that properly.
 
 ## 12. Verification
 

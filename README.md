@@ -29,7 +29,8 @@ No root. No `MediaProjection` consent dialog. No foreground service.
 | --- | --- |
 | React Native | 0.76+ (old and new architecture) |
 | Android | API 24+ (`accessibility` mode needs API 30+) |
-| iOS / tvOS | 15.1+ |
+| iOS | 15.1+ |
+| tvOS | 15.1+ (video only -- tvOS has no camera APIs) |
 
 ## Install
 

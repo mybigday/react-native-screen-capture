@@ -186,6 +186,21 @@ jobs:
         working-directory: example
         run: yarn install --frozen-lockfile
 
+      - name: tvOS syntax check
+        # The example has no tvOS target, so xcodebuild cannot cover the tvOS deployment target
+        # the podspec claims. These five sources depend only on UIKit/AVFoundation, so clang can
+        # parse them against the tvOS SDK directly -- which is enough to catch the real hazard:
+        # AVCaptureSession and AVCaptureVideoPreviewLayer are API_UNAVAILABLE(tvos).
+        run: |
+          set -euo pipefail
+          SDK=$(xcrun --sdk appletvsimulator --show-sdk-path)
+          for f in ios/ScreenCapture/RNSC*.m; do
+            echo "checking $f"
+            xcrun --sdk appletvsimulator clang -fsyntax-only -fobjc-arc \
+              -isysroot "$SDK" -target arm64-apple-tvos15.1-simulator \
+              -Iios/ScreenCapture "$f"
+          done
+
       - name: Set up Ruby
         # The example's Gemfile pins CocoaPods and xcodeproj away from versions known to break
         # React Native builds, so go through bundler rather than the runner's system pods.

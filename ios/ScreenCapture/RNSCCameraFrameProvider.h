@@ -5,6 +5,11 @@
 
 #import "RNSCFrameProvider.h"
 
+// AVCaptureSession and AVCaptureVideoPreviewLayer are API_UNAVAILABLE(tvos):
+// tvOS has no camera. Video capture still works there through AVPlayerLayer.
+#if !TARGET_OS_TV
+
+
 NS_ASSUME_NONNULL_BEGIN
 
 /**
@@ -24,3 +29,5 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 NS_ASSUME_NONNULL_END
+
+#endif // !TARGET_OS_TV
