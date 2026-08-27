@@ -231,6 +231,18 @@ if (await ScreenCapture.getPermissionStatus('accessibility') !== 'granted') {
 They have to enable it themselves under Settings → Accessibility → Downloaded apps. There is no
 programmatic way to switch it on, and no callback when they do — re-check on app resume.
 
+> **You will hit this during development.** Android blocks accessibility services for apps
+> installed from outside the Play Store, which includes anything you `adb install` or run from
+> Android Studio. The toggle either does nothing or silently reverts. Clear the restriction
+> first: **Settings → Apps → your app → ⋮ → Allow restricted settings**, or from a shell:
+>
+> ```sh
+> adb shell appops set <your.package> ACCESS_RESTRICTED_SETTINGS allow
+> ```
+>
+> Also note that `adb shell am force-stop` on your app makes the system switch the service
+> back off, since it treats the host process dying as the service failing.
+
 ### 3. Capture
 
 ```js

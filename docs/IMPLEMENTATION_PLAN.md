@@ -290,4 +290,25 @@ environment — no macOS. The following need a real device before release:
       0% for a control patch of app background -- a 3x green-channel ratio. The frame is in the
       capture, not a black hole. `dumpHierarchy` also works on device (6ms), and the library's
       `DETECT_SCREEN_CAPTURE` permission merges into the host app correctly.
-- [ ] Android: accessibility mode on API 30 and API 34
+- [x] **Android: accessibility mode**, verified end to end on the Pixel 7 Pro (API 37) with the
+      user's authorisation, and the device restored afterwards:
+      - the service declaration merges from the example's manifest, and the platform grants it
+        `capabilities=128` (`CAPABILITY_CAN_TAKE_SCREENSHOT`), so the
+        `android:canTakeScreenshot="true"` flag in the XML is doing its job
+      - `getPermissionStatus('accessibility')` reports `denied` while off and `granted` once the
+        service binds
+      - capturing with the service off rejects cleanly ("Accessibility service is not connected.
+        Enable it in Settings > Accessibility.") instead of crashing
+      - capturing with it on returns a full 1080x2340 image that **includes the real system
+        status bar and navigation bar**: 6.0% bright pixels in the top strip against 0.3% for the
+        same strip of a `view`-mode capture. That is the whole display, not just the app window.
+- [ ] Android: accessibility mode capture on API 30 (the minimum for `takeScreenshot`)
+
+Two platform behaviours worth knowing, both hit during that run and now in the README:
+
+- Android blocks accessibility services for apps installed outside the Play Store, which covers
+  anything `adb install`ed. The setting silently reverts until the restriction is cleared with
+  `appops set <pkg> ACCESS_RESTRICTED_SETTINGS allow`. The first attempt here looked exactly like
+  a bug in `getPermissionStatus` -- it was not; the service really had been switched off again.
+- `am force-stop` on the host app makes the system disable the service, since it treats the
+  process dying as the service failing.
