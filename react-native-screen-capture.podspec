@@ -9,7 +9,7 @@ Pod::Spec.new do |s|
   s.description  = package["description"]
   s.homepage     = "https://github.com/mybigday/react-native-screen-capture"
   s.license      = "MIT"
-  s.author       = { "Bricks Dev" => "dev@bricks.tools" }
+  s.author       = { "BRICKS INC." => "dev@bricks.tools" }
 
   s.platforms    = { :ios => "15.1", :tvos => "15.1" }
 

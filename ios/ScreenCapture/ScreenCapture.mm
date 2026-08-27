@@ -9,7 +9,7 @@
 
 #import <UIKit/UIKit.h>
 
-static NSString *const kCacheFolder = @"lewin-screen-capture";
+static NSString *const kCacheFolder = @"react-native-screen-capture";
 static NSString *const kEventScreenshot = @"ScreenCapture";
 static NSString *const kErrorCapture = @"E_CAPTURE";
 static NSString *const kErrorUnsupported = @"E_UNSUPPORTED";

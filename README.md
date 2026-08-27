@@ -203,7 +203,7 @@ including apps that only ever use `view` mode.
 
 ```xml
 <service
-    android:name="com.lewin.capture.ScreenCaptureAccessibilityService"
+    android:name="com.fugood.screencapture.ScreenCaptureAccessibilityService"
     android:exported="false"
     android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
   <intent-filter>

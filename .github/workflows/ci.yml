@@ -86,12 +86,13 @@ jobs:
           require "src/index.ts"
           require "src/NativeScreenCapture.ts"
           require "android/build.gradle"
-          require "android/src/main/java/com/lewin/capture/ScreenCaptureModule.java"
-          require "android/src/newarch/java/com/lewin/capture/ScreenCaptureSpec.java"
-          require "android/src/oldarch/java/com/lewin/capture/ScreenCaptureSpec.java"
+          require "android/src/main/java/com/fugood/screencapture/ScreenCaptureModule.java"
+          require "android/src/newarch/java/com/fugood/screencapture/ScreenCaptureSpec.java"
+          require "android/src/oldarch/java/com/fugood/screencapture/ScreenCaptureSpec.java"
           require "android/src/main/res/xml/screen_capture_accessibility_service.xml"
           require "ios/ScreenCapture/ScreenCapture.mm"
           require "react-native-screen-capture.podspec"
+          require "LICENSE"
 
           forbid "^example/"
           forbid "^docs/"
@@ -144,12 +145,12 @@ jobs:
         run: |
           set -euo pipefail
           CLASSES=android/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes
-          SUPER=$(javap -cp "$CLASSES" com.lewin.capture.ScreenCaptureSpec | grep 'abstract class')
+          SUPER=$(javap -cp "$CLASSES" com.fugood.screencapture.ScreenCaptureSpec | grep 'abstract class')
           echo "$SUPER"
           if [ "${{ matrix.newArchEnabled }}" = "true" ]; then
-            echo "$SUPER" | grep -q 'extends com.lewin.capture.NativeScreenCaptureSpec' \
+            echo "$SUPER" | grep -q 'extends com.fugood.screencapture.NativeScreenCaptureSpec' \
               || { echo "::error::expected the codegen spec on the new architecture"; exit 1; }
-            test -f android/build/generated/source/codegen/java/com/lewin/capture/NativeScreenCaptureSpec.java \
+            test -f android/build/generated/source/codegen/java/com/fugood/screencapture/NativeScreenCaptureSpec.java \
               || { echo "::error::codegen did not emit the Java spec"; exit 1; }
           else
             echo "$SUPER" | grep -q 'extends com.facebook.react.bridge.ReactContextBaseJavaModule' \

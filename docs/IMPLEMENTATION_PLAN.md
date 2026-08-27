@@ -11,7 +11,8 @@ Tracking issue: [#2](https://github.com/mybigday/react-native-screen-capture/iss
 | `screenshotty` library | **Not used** | Last commit 2021-07. No Android 14 per-session-consent or FGS-type handling. Adopting it means rewriting it anyway. |
 | Per-package adapter registry on iOS | **Rejected** | Requires upstream packages to cooperate. Not realistic. |
 | iOS strategy | **Runtime introspection of AVFoundation objects** | Matching on `AVCaptureVideoPreviewLayer` / `AVPlayerLayer` / `AVPlayerViewController` covers whole classes of packages at once, with zero user setup. |
-| Java package rename (`com.lewin.capture`) | **Deferred** | Cosmetic; would enlarge an already large diff. Noted as follow-up. |
+| Java package rename `com.lewin.capture` -> `com.fugood.screencapture` | **Done** | Reversed an earlier "cosmetic, defer it" call. The accessibility service is the one place the package name leaks into user code -- app authors paste the class name into their own manifest -- and that feature is new in 2.0.0, so nobody has it baked in yet. Renaming later would be a real breaking change; renaming now costs nothing. |
+| Licence | **MIT**, two copyright holders | The repo had no LICENSE file at all, `package.json` said ISC and the podspec said MIT. Settled on MIT with `Copyright (c) 2018 LewinJun` alongside `Copyright (c) 2022 BRICKS INC.`, since one file is still upstream code verbatim. |
 | Codegen spec object types | **`UnsafeObject`** | Declaring `capture`'s options as a codegen struct makes codegen emit `JS::NativeScreenCapture::NativeCaptureOptions &` on iOS, which forces Obj-C++ plus a separate old-arch implementation. `UnsafeObject` yields `NSDictionary` / `ReadableMap` and one implementation for both architectures. The public API in `src/index.ts` stays fully typed. |
 
 Resulting capture modes:
@@ -199,7 +200,7 @@ Verified locally:
 - **`example/android` builds a real debug APK**, through the actual React Native Gradle Plugin,
   alongside react-native-video and react-native-safe-area-context:
   - new architecture (RN 0.81 default): `BUILD SUCCESSFUL`. Codegen emitted
-    `NativeScreenCaptureSpec.java` into `com.lewin.capture` plus the JNI/C++ artifacts, and the
+    `NativeScreenCaptureSpec.java` into `com.fugood.screencapture` plus the JNI/C++ artifacts, and the
     `newarch` source set compiled against it.
   - old architecture (`-PnewArchEnabled=false`): `BUILD SUCCESSFUL`. Verified with `javap` that
     `ScreenCaptureSpec` then extends `ReactContextBaseJavaModule` and that no codegen spec class
@@ -212,7 +213,7 @@ Verified locally:
 - iOS code is **review-only here** -- there is no macOS in this environment, so none of it has
   been compiled or run. Everything in the checklist below is still open.
 - `AVSampleBufferDisplayLayer` support (react-native-webrtc) is designed but not implemented.
-- Java package rename `com.lewin.capture` -> `com.fugood.screencapture`.
+- Java package rename `com.fugood.screencapture` -> `com.fugood.screencapture`.
 
 ## 10. Example app
 

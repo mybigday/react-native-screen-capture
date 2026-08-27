@@ -1,4 +1,4 @@
-package com.lewin.capture;
+package com.fugood.screencapture;
 
 import com.facebook.react.bridge.ReactApplicationContext;
 

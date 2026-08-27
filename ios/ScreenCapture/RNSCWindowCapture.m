@@ -6,7 +6,7 @@
 #import "RNSCWindowCapture.h"
 #import "RNSCProviderRegistry.h"
 
-static NSString *const kErrorDomain = @"com.lewin.capture";
+static NSString *const kErrorDomain = @"com.fugood.screencapture";
 
 /** Attaching a provider does not produce a frame instantly; give it a couple of frames. */
 static const NSInteger kMaxFrameWaitAttempts = 8;

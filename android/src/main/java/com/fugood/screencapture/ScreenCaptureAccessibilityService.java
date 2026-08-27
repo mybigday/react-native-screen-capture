@@ -1,4 +1,4 @@
-package com.lewin.capture;
+package com.fugood.screencapture;
 
 import android.accessibilityservice.AccessibilityService;
 import android.content.ComponentName;

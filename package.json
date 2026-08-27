@@ -50,7 +50,7 @@
     "camera",
     "video"
   ],
-  "author": "Bricks Dev <dev@bricks.tools>",
+  "author": "BRICKS INC. <dev@bricks.tools>",
   "license": "MIT",
   "bugs": {
     "url": "https://github.com/mybigday/react-native-screen-capture/issues"
@@ -72,7 +72,7 @@
     "type": "modules",
     "jsSrcsDir": "src",
     "android": {
-      "javaPackageName": "com.lewin.capture"
+      "javaPackageName": "com.fugood.screencapture"
     },
     "outputDir": {
       "ios": "ios/generated",

@@ -41,7 +41,7 @@
         _targetView = targetView;
         _session = session;
         _identifier = [NSString stringWithFormat:@"camera:%p", session];
-        _queue = dispatch_queue_create("com.lewin.capture.camera", DISPATCH_QUEUE_SERIAL);
+        _queue = dispatch_queue_create("com.fugood.screencapture.camera", DISPATCH_QUEUE_SERIAL);
         _lock = OS_UNFAIR_LOCK_INIT;
     }
     return self;

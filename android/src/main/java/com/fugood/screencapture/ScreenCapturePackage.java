@@ -1,4 +1,4 @@
-package com.lewin.capture;
+package com.fugood.screencapture;
 
 import androidx.annotation.Nullable;
 

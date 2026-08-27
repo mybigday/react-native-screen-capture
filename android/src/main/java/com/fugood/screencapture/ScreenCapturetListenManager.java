@@ -1,4 +1,14 @@
-package com.lewin.capture;
+/*
+ * Copyright (c) 2018 LewinJun
+ *
+ * Taken unmodified from react-native-lewin-screen-capture, the project this one was forked
+ * from. It is the pre-Android-14 screenshot detection fallback: watch MediaStore for a new
+ * file whose name looks like a screenshot. Unreliable under scoped storage, which is why
+ * ScreenshotDetector prefers Activity#registerScreenCaptureCallback on API 34+.
+ *
+ * Licensed under the MIT License; see LICENSE at the root of this repository.
+ */
+package com.fugood.screencapture;
 
 import android.content.Context;
 import android.database.ContentObserver;
@@ -87,9 +97,9 @@ public class ScreenCapturetListenManager {
         if (sScreenRealSize == null) {
             sScreenRealSize = getRealScreenSize();
             if (sScreenRealSize != null) {
-                Log.e("lewinScreen","Screen Real Size: " + sScreenRealSize.x + " * " + sScreenRealSize.y);
+                Log.e("ScreenCapture","Screen Real Size: " + sScreenRealSize.x + " * " + sScreenRealSize.y);
             } else {
-                Log.e("lewinScreen","Get screen real size failed.");
+                Log.e("ScreenCapture","Get screen real size failed.");
             }
         }
         mFileKeyWords = fileKeyWords;
@@ -173,11 +183,11 @@ public class ScreenCapturetListenManager {
             );
 
             if (cursor == null) {
-                Log.e("lewinScreen","Deviant logic.");
+                Log.e("ScreenCapture","Deviant logic.");
                 return;
             }
             if (!cursor.moveToFirst()) {
-                Log.e("lewinScreen","Cursor no data.");
+                Log.e("ScreenCapture","Cursor no data.");
                 return;
             }
 
@@ -231,14 +241,14 @@ public class ScreenCapturetListenManager {
      */
     private void handleMediaRowData(String data, long dateTaken, int width, int height) {
         if (checkScreenShot(data, dateTaken, width, height)) {
-            Log.e("lewinScreen","ScreenShot: path = " + data + "; size = " + width + " * " + height
+            Log.e("ScreenCapture","ScreenShot: path = " + data + "; size = " + width + " * " + height
                     + "; date = " + dateTaken);
             if (mListener != null && !checkCallback(data)) {
                 mListener.onShot(data);
             }
         } else {
             // 如果在观察区间媒体数据库有数据改变，又不符合截屏规则，则输出到 log 待分析
-            Log.e("lewinScreen","Media content changed, but not screenshot: path = " + data
+            Log.e("ScreenCapture","Media content changed, but not screenshot: path = " + data
                     + "; size = " + width + " * " + height + "; date = " + dateTaken);
         }
     }
