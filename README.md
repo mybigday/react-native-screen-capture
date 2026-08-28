@@ -147,14 +147,9 @@ shape for a screenshot utility. See [issue #2](https://github.com/mybigday/react
 | DRM content | **no — black** | **no — black** |
 | `FLAG_SECURE` windows (Android) | **no — black** | **no — black** |
 
-> **Verifying this in a simulator will mislead you.** The iOS and tvOS simulators composite
-> `AVPlayerLayer` and `AVCaptureVideoPreviewLayer` into a `drawViewHierarchy` snapshot natively;
-> real devices do not. Measured on an iPhone: with this library's compositing skipped, the video
-> region comes back as a single uniform black, while the same build in a simulator returns a full
-> picture either way. Apple's [QA1817](https://developer.apple.com/library/archive/qa/qa1817/_index.html)
-> says the snapshot works "regardless of the drawing techniques (for example UIKit, Quartz,
-> OpenGL ES, SpriteKit, etc)" -- every item there is drawing the app's own process does, and
-> AVFoundation layers are composited out of process, which is exactly why they are missing.
+> **Verify on a real device.** The iOS and tvOS simulators composite video and camera layers
+> into a snapshot by themselves, so a simulator cannot tell you whether capture is actually
+> working. Devices do not.
 
 Two limits are not fixable from an app and never will be:
 
@@ -248,9 +243,7 @@ programmatic way to switch it on, and no callback when they do — re-check on a
 > ```sh
 > adb shell appops set <your.package> ACCESS_RESTRICTED_SETTINGS allow
 > ```
->
-> Also note that `adb shell am force-stop` on your app makes the system switch the service
-> back off, since it treats the host process dying as the service failing.
+
 
 ### 3. Capture
 
@@ -347,12 +340,6 @@ FRAME PROVIDERS
 
 `hasFrame=no` means the component was found but its frames are not reachable — DRM being the
 usual cause.
-
-> **Xcode 26 note.** React Native 0.81 pins fmt 11.0.2, which does not compile under the Xcode 26
-> toolchain (`call to consteval function ... is not a constant expression` from
-> `Pods/fmt/include/fmt/format-inl.h`). This is upstream, not this package — it hits any RN 0.81
-> project. Until React Native bumps fmt, either build with Xcode 16, or force fmt's constexpr
-> path by defining `FMT_USE_CONSTEVAL=0` for the fmt pod.
 
 ## Migrating from 1.x
 
