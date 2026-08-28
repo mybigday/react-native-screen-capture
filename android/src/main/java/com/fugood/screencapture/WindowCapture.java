@@ -1,6 +1,7 @@
 package com.fugood.screencapture;
 
 import android.app.Activity;
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Rect;
@@ -245,8 +246,28 @@ final class WindowCapture {
             }
             return insets.getSystemWindowInsetTop();
         }
-        int id = activity.getResources().getIdentifier("status_bar_height", "dimen", "android");
-        return id > 0 ? activity.getResources().getDimensionPixelSize(id) : 0;
+        return statusBarHeight(activity);
+    }
+
+    /**
+     * Status bar height without a window to ask. Used by {@code accessibility} mode, which
+     * captures the whole display and so has no decor view whose insets could be read.
+     */
+    static int statusBarHeight(final Context context) {
+        int id = context.getResources().getIdentifier("status_bar_height", "dimen", "android");
+        return id > 0 ? context.getResources().getDimensionPixelSize(id) : 0;
+    }
+
+    /**
+     * Crops the status bar off a full-display capture. Recycles {@code source} when it crops.
+     */
+    static Bitmap cropStatusBar(final Context context, final Bitmap source) {
+        int top = statusBarHeight(context);
+        if (top <= 0 || top >= source.getHeight()) return source;
+        Bitmap cropped =
+            Bitmap.createBitmap(source, 0, top, source.getWidth(), source.getHeight() - top);
+        if (cropped != source) source.recycle();
+        return cropped;
     }
 
     /** Dev helper backing {@code dumpHierarchy()}. */

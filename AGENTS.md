@@ -71,6 +71,11 @@ resolution for every package. The Metro warning it silences is harmless.
 
 ### Android
 
+- `PixelCopy.request(SurfaceView, Bitmap, listener, Handler)` is available from **API 24**, not
+  26. Only the `Rect` and `Window` overloads are 26 — check `api-versions.xml` in the SDK before
+  believing an availability claim:
+  `platforms/android-<n>/data/api-versions.xml`, where a method with no `since` inherits the
+  class's. This has already been reported once as a bug that was not one.
 - `am force-stop` on an app hosting an accessibility service makes the system switch that
   service off. Restart the app instead when testing accessibility mode.
 - Accessibility services are blocked for apps installed outside the Play Store, which includes

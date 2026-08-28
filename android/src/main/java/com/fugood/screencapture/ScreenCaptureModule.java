@@ -84,7 +84,13 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             ScreenCaptureAccessibilityService.capture(new ScreenCaptureAccessibilityService.Callback() {
                 @Override
                 public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
-                    onBitmap.onResult(bitmap, error);
+                    // This mode captures the whole display, so it is the one mode that really
+                    // does include the system bars -- and therefore the one that has to honour
+                    // excludeStatusBar itself. WindowCapture applies it for `view` mode only.
+                    Bitmap result = (bitmap != null && excludeStatusBar)
+                        ? WindowCapture.cropStatusBar(reactContext, bitmap)
+                        : bitmap;
+                    onBitmap.onResult(result, error);
                 }
             });
             return;
