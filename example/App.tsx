@@ -18,7 +18,7 @@ import {
   Text,
   View,
 } from 'react-native'
-import Video from 'react-native-video'
+import VideoPlayer from '@fugood/react-native-video-player'
 import ScreenCapture, {
   type CaptureMode,
   type CaptureOptions,
@@ -97,14 +97,13 @@ export default function App() {
         <Text style={styles.status}>{status}</Text>
 
         <Section title="Live video (SurfaceView / AVPlayerLayer)">
-          <Video
+          <VideoPlayer
             source={{ uri: SAMPLE_VIDEO }}
             style={styles.video}
             resizeMode="contain"
-            repeat
             muted
-            // Force a SurfaceView on Android: that is the case a plain window readback
-            // cannot see, and the one this library composites back in.
+            // Left at the default, which is a SurfaceView on Android: that is the case a plain
+            // window readback cannot see, and the one this library composites back in.
             useTextureView={false}
           />
         </Section>

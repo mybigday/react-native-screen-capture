@@ -258,6 +258,29 @@ AOSP source, where the `Window` overload resolves to `sourceForWindow()` (the Vi
 surface) while the `SurfaceView` overload resolves to `getHolder().getSurface()`: two separate
 surfaces, combined only by SurfaceFlinger at display time.
 
+## 10c. Why the field reports and the measurements disagreed
+
+They did not, in the end. The apparent contradiction was the broken A/B harness described above.
+What *is* real, and is the trap behind most of the confusion:
+
+**The simulator captures AVFoundation layers natively; devices do not.** Measured both ways here:
+iOS device gives (0,0,0) with the placeholder skipped, while the iOS and tvOS simulators return a
+full picture either way. Anyone verifying "does my screenshot include the video" in a simulator
+gets a pass that does not hold on hardware.
+
+Apple's [Technical Q&A QA1817](https://developer.apple.com/library/archive/qa/qa1817/_index.html)
+is also widely read as a guarantee that it always works:
+
+> "This new method `-drawViewHierarchyInRect:afterScreenUpdates:` enables you to capture the
+> contents of the receiver view and its subviews to an image regardless of the drawing techniques
+> (for example UIKit, Quartz, OpenGL ES, SpriteKit, etc) in which the views are rendered."
+
+Every item in that list is drawing the app's own process performs. `AVPlayerLayer` and
+`AVCaptureVideoPreviewLayer` are not drawing techniques at all -- their content is composited out
+of process and never enters the app's render tree, which is exactly why it cannot be drawn into
+an app-side context. The sentence is accurate and still misleading if read as "captures
+everything".
+
 ## 11. CI
 
 `.github/workflows/ci.yml` runs everything that was verified by hand while building this,
@@ -311,28 +334,41 @@ environment — no macOS. The following need a real device before release:
       What a simulator **cannot** answer is the only thing left: whether `drawViewHierarchy`
       picks up the placeholder on a real device. In the simulator it captures AVFoundation layers
       natively, so the result looks identical either way. That needs the device.
-- [x] **iOS on a real device (iPhone XR, iOS 18.7.9) -- and the result contradicts the premise
-      this design was built on.** Captured twice back to back, once with the placeholder pass and
-      once with it skipped behind a temporary debug flag, then pulled both PNGs off the device:
+- [x] **iOS on a real device (iPhone XR, iOS 18.7.9) -- the placeholder pass is required.**
+      Captured twice back to back, once normally and once with the placeholder pass skipped
+      behind a debug flag, using `@fugood/react-native-video-player` 1.0.0-beta.0 for the video
+      and a native `AVCaptureVideoPreviewLayer` for the camera:
 
-      | | video region | non-black |
+      | region | with placeholder | placeholder skipped |
       | --- | --- | --- |
-      | with placeholder | mean RGB (66.0, 81.0, 55.3) | 67.0% |
-      | placeholder skipped | mean RGB (66.3, 81.1, 55.5) | 67.4% |
+      | video (`AVPlayerLayer`) | 94.1% non-black, 102046 colours | **(0,0,0), 1 colour** |
+      | camera (`AVCaptureVideoPreviewLayer`) | 49.6% non-black, 3150 colours | **(0,0,0), 1 colour** |
 
-      Identical. The provider was genuinely live at the time (`hasFrame=YES` on device), so the
-      placeholder really was installed in the first capture -- and the video shows up without it
-      just the same. **`drawViewHierarchyInRect:afterScreenUpdates:YES` captures AVPlayerLayer
-      content natively on iOS 18.7.** For this case the placeholder machinery is redundant.
+      `drawViewHierarchyInRect:afterScreenUpdates:YES` captures neither on device. Both regions
+      come back as a single uniform black -- the signature of a layer that was never composited
+      in. The PNGs differ 1.2 MB vs 94 KB for the same reason.
 
-      Scope of that claim, before acting on it: it covers non-DRM video in an `AVPlayerLayer` on
-      iOS 18.7 only. It says nothing about `AVCaptureVideoPreviewLayer`, which is where the
-      black-frame reports are most consistent, nor about older iOS versions, nor about
-      `AVSampleBufferDisplayLayer`.
-- [ ] **iOS: VisionCamera (`AVCaptureVideoPreviewLayer`) -- untested, and now the deciding
-      question.** If drawViewHierarchy also handles camera preview, the whole iOS provider stack
-      is unnecessary complexity paying a real decoder/capture cost, and should be deleted. If it
-      does not, the stack earns its place and this is simply a case where it was not needed.
+      **An earlier run of this same test concluded the opposite, and that conclusion was wrong.**
+      `capture()` rebuilds its options object from known keys only, so the debug flag was dropped
+      in JS and never reached native: both sides of the A/B were running the *same* code path.
+      The harness now calls the native module directly. Anything measured before that fix is void.
+
+- [x] **iOS camera** -- covered by the table above. VisionCamera itself could not be used: its
+      Nitro Modules dependency fails to build under Xcode 26 (glog's `logging.h` does an
+      `#include` inside `namespace google`, which Clang modules reject). A plain
+      `AVCaptureVideoPreviewLayer` was used instead, which is the thing the provider matches on
+      anyway.
+- [x] **tvOS**, via a minimal native harness (no React Native -- tvOS needs the react-native-tvos
+      fork) built straight against the tvOS SDK and run on an Apple TV 4K simulator:
+      - the library compiles and links for tvOS; the camera provider is correctly compiled out
+      - discovery finds the `AVPlayerLayer`, and the frame pipeline works: `hasFrame=YES`,
+        `newFrameImage` returns an image
+      - **but the tvOS simulator captures the video natively**, so with/without the placeholder
+        produced byte-identical PNGs. That is the same false pass the iOS simulator gives, and we
+        now have hard numbers proving the iOS simulator disagrees with the iOS device. So this
+        says nothing about real Apple TV hardware.
+      Verdict: tvOS is compile- and runtime-verified as far as a simulator can go; whether the
+      placeholder is *needed* there is unknown without hardware.
 - [ ] iOS: `afterScreenUpdates: false` + `CATransaction.flush()` — does it pick up the placeholder?
 - [ ] iOS: IOSurface-direct `layer.contents` vs `CIContext` conversion timings
 - [x] **Android: overlay drawable really does cover the SurfaceView hole in the window readback.**

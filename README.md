@@ -147,6 +147,15 @@ shape for a screenshot utility. See [issue #2](https://github.com/mybigday/react
 | DRM content | **no — black** | **no — black** |
 | `FLAG_SECURE` windows (Android) | **no — black** | **no — black** |
 
+> **Verifying this in a simulator will mislead you.** The iOS and tvOS simulators composite
+> `AVPlayerLayer` and `AVCaptureVideoPreviewLayer` into a `drawViewHierarchy` snapshot natively;
+> real devices do not. Measured on an iPhone: with this library's compositing skipped, the video
+> region comes back as a single uniform black, while the same build in a simulator returns a full
+> picture either way. Apple's [QA1817](https://developer.apple.com/library/archive/qa/qa1817/_index.html)
+> says the snapshot works "regardless of the drawing techniques (for example UIKit, Quartz,
+> OpenGL ES, SpriteKit, etc)" -- every item there is drawing the app's own process does, and
+> AVFoundation layers are composited out of process, which is exactly why they are missing.
+
 Two limits are not fixable from an app and never will be:
 
 - **FairPlay / Widevine L1 video comes out black.** Decoded frames never leave the hardware

@@ -1051,6 +1051,11 @@
   version "0.0.0"
   uid ""
 
+"@fugood/react-native-video-player@1.0.0-beta.0":
+  version "1.0.0-beta.0"
+  resolved "https://registry.yarnpkg.com/@fugood/react-native-video-player/-/react-native-video-player-1.0.0-beta.0.tgz#e966a11d7a777c9e965b9a8a85796bd7bc67afb2"
+  integrity sha512-BfJFnI7TValTHHh0ABJpci3t8M15hDOXH8bw80+7Gu8P5jfeiHB3Gu3R0H9ZXwkKf5p/IIQYzQrBAoB/9Xfxpg==
+
 "@hapi/hoek@^9.0.0", "@hapi/hoek@^9.3.0":
   version "9.3.0"
   resolved "https://registry.yarnpkg.com/@hapi/hoek/-/hoek-9.3.0.tgz#8368869dcb735be2e7f5cb7647de78e167a251fb"
@@ -5392,11 +5397,6 @@ react-native-safe-area-context@^5.5.2:
   version "5.9.1"
   resolved "https://registry.yarnpkg.com/react-native-safe-area-context/-/react-native-safe-area-context-5.9.1.tgz#ee5b2730f0816a22a332352076395c3f48aaa442"
   integrity sha512-Zpx9Iwg6VhgNarWFpcIM61xK2lUbSfSXemQUmcvOVRpux49lJsUompY1S3E5jKUJbLq233qEpj28DgmXVsgZMQ==
-
-react-native-video@^6.19.2:
-  version "6.19.2"
-  resolved "https://registry.yarnpkg.com/react-native-video/-/react-native-video-6.19.2.tgz#91065e087f90bc653b312ff2347903345c4f2411"
-  integrity sha512-gh5dBMGSHywKr8+p4azRXrFQgT+QTmS1tI4sz6kVRjSENORfsrGGLQzmyo/7S9m+ZOTLWQJ3h8ONaXxR4F2Fcw==
 
 react-native@0.81.0:
   version "0.81.0"
