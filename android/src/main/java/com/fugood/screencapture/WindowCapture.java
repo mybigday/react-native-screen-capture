@@ -37,6 +37,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>{@link TextureView} needs no special handling: it draws through the view hierarchy and
  * is already present in the window readback.
+ *
+ * <p>Also holds the status-bar geometry shared with {@code accessibility} mode, which captures
+ * the whole display and so has no window of its own to measure.
  */
 final class WindowCapture {
 
@@ -169,7 +172,7 @@ final class WindowCapture {
                                       final Callback callback) {
         final int width = decor.getWidth();
         final int height = decor.getHeight();
-        int offset = excludeStatusBar ? statusBarHeight(activity, decor) : 0;
+        int offset = excludeStatusBar ? windowStatusBarHeight(activity, decor) : 0;
         if (offset < 0 || offset >= height) offset = 0;
         final int top = offset;
         final int outHeight = height - top;
@@ -204,9 +207,7 @@ final class WindowCapture {
         try {
             full = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             decor.draw(new Canvas(full));
-            Bitmap out = top > 0 ? Bitmap.createBitmap(full, 0, top, width, outHeight) : full;
-            if (out != full) full.recycle();
-            callback.onResult(out, null);
+            callback.onResult(cropTop(full, top), null);
         } catch (Throwable t) {
             if (full != null) full.recycle();
             callback.onResult(null, String.valueOf(t.getMessage()));
@@ -238,7 +239,7 @@ final class WindowCapture {
     }
 
     @SuppressWarnings("deprecation")
-    private static int statusBarHeight(final Activity activity, final View decor) {
+    private static int windowStatusBarHeight(final Activity activity, final View decor) {
         WindowInsets insets = decor.getRootWindowInsets();
         if (insets != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -246,27 +247,42 @@ final class WindowCapture {
             }
             return insets.getSystemWindowInsetTop();
         }
-        return statusBarHeight(activity);
+        return nominalStatusBarHeight(activity);
     }
 
     /**
-     * Status bar height without a window to ask. Used by {@code accessibility} mode, which
-     * captures the whole display and so has no decor view whose insets could be read.
+     * Status bar height to crop off a whole-display capture, for {@code accessibility} mode --
+     * which has no window of its own to measure.
+     *
+     * <p>Prefers the inset actually in effect, so an app running immersive or behind a cutout
+     * gets the real height rather than the platform's nominal one. Note the limit: the inset
+     * describes <em>this</em> app's window, while the capture is of the whole display, so a
+     * different foreground app in a different mode can still disagree.
      */
-    static int statusBarHeight(final Context context) {
+    static int displayStatusBarHeight(@Nullable final Activity activity, final Context context) {
+        if (activity != null && activity.getWindow() != null) {
+            View decor = activity.getWindow().getDecorView();
+            if (decor.getRootWindowInsets() != null) return windowStatusBarHeight(activity, decor);
+        }
+        return nominalStatusBarHeight(context);
+    }
+
+    /**
+     * Deliberately not called {@code statusBarHeight}: an {@code Activity} is a {@code Context},
+     * so an overload would silently resolve to this insets-blind version at any call site that
+     * meant the other one.
+     */
+    private static int nominalStatusBarHeight(final Context context) {
         int id = context.getResources().getIdentifier("status_bar_height", "dimen", "android");
         return id > 0 ? context.getResources().getDimensionPixelSize(id) : 0;
     }
 
-    /**
-     * Crops the status bar off a full-display capture. Recycles {@code source} when it crops.
-     */
-    static Bitmap cropStatusBar(final Context context, final Bitmap source) {
-        int top = statusBarHeight(context);
+    /** Drops {@code top} rows off a bitmap, recycling the original. Returns it unchanged at 0. */
+    static Bitmap cropTop(final Bitmap source, final int top) {
         if (top <= 0 || top >= source.getHeight()) return source;
         Bitmap cropped =
             Bitmap.createBitmap(source, 0, top, source.getWidth(), source.getHeight() - top);
-        if (cropped != source) source.recycle();
+        source.recycle();
         return cropped;
     }
 

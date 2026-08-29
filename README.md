@@ -165,6 +165,10 @@ mean non-SDK reflection, which we do not do. Use `accessibility` mode if you nee
 The iOS status bar is drawn by a separate system process and is not in the app's windows, so it
 is never captured. `excludeStatusBar: true` crops that area off.
 
+On Android `excludeStatusBar` applies in both modes: `view` crops during the readback, and
+`accessibility` — which really does capture the system bars — crops them off the captured
+display. The navigation bar is not cropped in either mode.
+
 ## Supported media components
 
 iOS discovery is pure runtime introspection: we look for AVFoundation objects reached through

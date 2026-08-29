@@ -3,6 +3,7 @@ package com.fugood.screencapture;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.Matrix;
 import android.provider.Settings;
 import android.util.Base64;
 
@@ -69,6 +70,12 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         final boolean includeBase64 =
             options.hasKey("includeBase64") && options.getBoolean("includeBase64");
 
+        // `view` mode crops during the window readback; a whole-display capture cannot, so its
+        // crop is deferred to encode() -- which also keeps the allocation inside a try/catch.
+        final int cropTop = (MODE_ACCESSIBILITY.equals(mode) && excludeStatusBar)
+            ? WindowCapture.displayStatusBarHeight(getCurrentActivity(), reactContext)
+            : 0;
+
         final WindowCapture.Callback onBitmap = new WindowCapture.Callback() {
             @Override
             public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
@@ -76,7 +83,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                     promise.reject(E_CAPTURE, error != null ? error : "Capture failed");
                     return;
                 }
-                encode(bitmap, extension, quality, scale, includeBase64, promise);
+                encode(bitmap, extension, quality, scale, includeBase64, cropTop, promise);
             }
         };
 
@@ -84,13 +91,10 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             ScreenCaptureAccessibilityService.capture(new ScreenCaptureAccessibilityService.Callback() {
                 @Override
                 public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
-                    // This mode captures the whole display, so it is the one mode that really
-                    // does include the system bars -- and therefore the one that has to honour
-                    // excludeStatusBar itself. WindowCapture applies it for `view` mode only.
-                    Bitmap result = (bitmap != null && excludeStatusBar)
-                        ? WindowCapture.cropStatusBar(reactContext, bitmap)
-                        : bitmap;
-                    onBitmap.onResult(result, error);
+                    // Nothing heavy here on purpose: the service calls this outside its own
+                    // try/catch, so anything that can throw would escape and leave the Promise
+                    // unsettled forever.
+                    onBitmap.onResult(bitmap, error);
                 }
             });
             return;
@@ -105,16 +109,26 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
     }
 
     private void encode(final Bitmap source, final String extension, final int quality,
-                        final double scale, final boolean includeBase64, final Promise promise) {
+                        final double scale, final boolean includeBase64, final int cropTop,
+                        final Promise promise) {
         encoder.execute(new Runnable() {
             @Override
             public void run() {
                 Bitmap bitmap = source;
                 try {
-                    if (scale > 0 && scale != 1d) {
-                        int width = Math.max(1, (int) Math.round(source.getWidth() * scale));
-                        int height = Math.max(1, (int) Math.round(source.getHeight() * scale));
-                        bitmap = Bitmap.createScaledBitmap(source, width, height, true);
+                    final int top = (cropTop > 0 && cropTop < source.getHeight()) ? cropTop : 0;
+                    final boolean resize = scale > 0 && scale != 1d;
+                    if (top > 0 || resize) {
+                        // One allocation for both. Cropping and then rescaling would hold two
+                        // full-display bitmaps at once on top of the one the caller handed us.
+                        Matrix matrix = null;
+                        if (resize) {
+                            matrix = new Matrix();
+                            matrix.postScale((float) scale, (float) scale);
+                        }
+                        bitmap = Bitmap.createBitmap(
+                            source, 0, top, source.getWidth(), source.getHeight() - top,
+                            matrix, true);
                         if (bitmap != source) source.recycle();
                     }
 
