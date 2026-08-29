@@ -14,6 +14,23 @@
 @interface RNSCCameraFrameProvider () <AVCaptureVideoDataOutputSampleBufferDelegate>
 @end
 
+/**
+ * The pre-iOS-17 spelling of videoRotationAngle, in the same degrees so the two paths can be
+ * compared the same way. Only the difference between two connections is used, so all that
+ * matters is that the mapping is consistent.
+ */
+API_DEPRECATED_WITH_REPLACEMENT("videoRotationAngle", ios(6.0, 17.0))
+static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientation)
+{
+    switch (orientation) {
+        case AVCaptureVideoOrientationPortrait: return 90;
+        case AVCaptureVideoOrientationPortraitUpsideDown: return 270;
+        case AVCaptureVideoOrientationLandscapeRight: return 0;
+        case AVCaptureVideoOrientationLandscapeLeft: return 180;
+    }
+    return 0;
+}
+
 @implementation RNSCCameraFrameProvider {
     __weak AVCaptureVideoPreviewLayer *_previewLayer;
     __weak UIView *_targetView;
@@ -30,6 +47,8 @@
     os_unfair_lock _lock;
     CVPixelBufferRef _latest;
     BOOL _attached;
+    /** Set when the session refused another output, so we stop re-probing it every capture. */
+    BOOL _attachRefused;
 }
 
 @synthesize identifier = _identifier;
@@ -66,7 +85,7 @@
 
 - (void)attach
 {
-    if (_attached) return;
+    if (_attached || _attachRefused) return;
     AVCaptureSession *session = _session;
     if (!session) return;
 
@@ -96,12 +115,22 @@
     output.videoSettings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
     };
-    if (![session canAddOutput:output]) return;
+    // A session at its output limit will not take another one, and will not start to later in
+    // this session's life. hasFrame stays NO, so no placeholder is installed and the preview
+    // region falls back to whatever drawViewHierarchyInRect gives -- which dumpHierarchy
+    // reports honestly as a matched component with hasFrame=no.
+    if (![session canAddOutput:output]) {
+        _attachRefused = YES;
+        return;
+    }
 
     [session beginConfiguration];
     [session addOutput:output];
     [session commitConfiguration];
-    if (![session.outputs containsObject:output]) return;
+    if (![session.outputs containsObject:output]) {
+        _attachRefused = YES;
+        return;
+    }
 
     _ownedOutput = output;
     [output setSampleBufferDelegate:self queue:_queue];
@@ -184,6 +213,12 @@
     CGFloat angle = 0;
     if (@available(iOS 17.0, tvOS 17.0, *)) {
         angle = preview.videoRotationAngle - output.videoRotationAngle;
+    } else {
+        // videoRotationAngle is iOS 17+, but the podspec targets 15.1: without this the
+        // correction was simply dead on 15 and 16, and a front camera in landscape came back
+        // rotated a quarter turn.
+        angle = RNSCAngleForVideoOrientation(preview.videoOrientation)
+              - RNSCAngleForVideoOrientation(output.videoOrientation);
     }
 
     CATransform3D transform = CATransform3DIdentity;

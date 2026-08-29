@@ -50,6 +50,11 @@ export type Subscription = { remove(): void }
 
 const EVENT_SCREENSHOT = 'ScreenCapture'
 
+// Counted here rather than asked of the emitter: `ScreenCapture` is a bare global device event,
+// so emitter.listenerCount() also sees 1.x-era DeviceEventEmitter listeners and any second copy
+// of this package -- which would keep native detection running after our last subscriber left.
+let listeners = 0
+
 const emitter = new NativeEventEmitter(
   // The TurboModule object is a valid emitter target on the new architecture;
   // the bridge module is what NativeEventEmitter wants on the old one.
@@ -61,7 +66,9 @@ let defaultMode: CaptureMode = 'auto'
 // The accessibility service can only be switched on from system Settings, which means the app
 // was backgrounded in between. Caching the answer keeps a burst of captures from paying a
 // native round-trip each, which would otherwise sit in front of every single frame.
-let accessibilityStatus: PermissionStatus | null = null
+// The promise, not the resolved value: a burst that starts in one tick would otherwise see a
+// null cache on every call and fire a round-trip each, which is what the cache is here to stop.
+let accessibilityStatus: Promise<PermissionStatus> | null = null
 AppState.addEventListener('change', (state) => {
   if (state === 'active') accessibilityStatus = null
 })
@@ -70,11 +77,15 @@ async function resolveMode(mode: CaptureMode): Promise<'view' | 'accessibility'>
   if (mode !== 'auto') return mode
   if (Platform.OS !== 'android') return 'view'
   if (accessibilityStatus === null) {
-    accessibilityStatus = (await NativeScreenCapture.getPermissionStatus(
-      'accessibility',
-    )) as PermissionStatus
+    // A rejected lookup must not be cached, or one transient failure pins the app to `view`.
+    accessibilityStatus = (
+      NativeScreenCapture.getPermissionStatus('accessibility') as Promise<PermissionStatus>
+    ).catch((error) => {
+      accessibilityStatus = null
+      throw error
+    })
   }
-  return accessibilityStatus === 'granted' ? 'accessibility' : 'view'
+  return (await accessibilityStatus) === 'granted' ? 'accessibility' : 'view'
 }
 
 /** Set the mode used when `capture()` is called without an explicit one. */
@@ -88,13 +99,17 @@ export function getMode(): CaptureMode {
 
 export async function capture(options: CaptureOptions = {}): Promise<CaptureResult> {
   const mode = await resolveMode(options.mode ?? defaultMode)
+  // Spread first, defaults after: rebuilding the object key by key dropped everything this
+  // union does not name, which once turned an A/B test into two identical runs. Unknown keys
+  // are the native side's business, not this function's.
   const result = await NativeScreenCapture.capture({
+    excludeStatusBar: false,
+    extension: 'png',
+    quality: 100,
+    scale: 1,
+    includeBase64: false,
+    ...options,
     mode,
-    excludeStatusBar: options.excludeStatusBar ?? false,
-    extension: options.extension ?? 'png',
-    quality: options.quality ?? 100,
-    scale: options.scale ?? 1,
-    includeBase64: options.includeBase64 ?? false,
   })
   return result as CaptureResult
 }
@@ -161,11 +176,16 @@ export function addScreenshotListener(
   listener: (event: ScreenshotEvent) => void,
 ): Subscription {
   const sub = emitter.addListener(EVENT_SCREENSHOT, listener)
+  listeners += 1
   NativeScreenCapture.startScreenshotDetection().catch(() => {})
+  let removed = false
   return {
     remove: () => {
+      if (removed) return
+      removed = true
       sub.remove()
-      if (emitter.listenerCount(EVENT_SCREENSHOT) === 0) {
+      listeners -= 1
+      if (listeners === 0) {
         NativeScreenCapture.stopScreenshotDetection().catch(() => {})
       }
     },
@@ -219,7 +239,11 @@ export function startListener(
 
 /** @deprecated Remove the subscription returned by `addScreenshotListener()` instead. */
 export function stopListener(): Promise<void> {
+  // Keeps 1.x's behaviour, including its bluntness: on a bare global event this also drops
+  // listeners registered by other code. That is why it is deprecated in favour of removing the
+  // subscription addScreenshotListener() hands back.
   emitter.removeAllListeners(EVENT_SCREENSHOT)
+  listeners = 0
   return NativeScreenCapture.stopScreenshotDetection()
 }
 

@@ -177,18 +177,28 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
 
 #pragma mark - modes and permissions
 
+/**
+ * Whether a mode can ever work here. `accessibility` is Android-only; `auto` is the library's
+ * default and always resolves to `view` on this platform, so reporting it unavailable would
+ * hide the capture button in any app that gates on isModeAvailable(getMode()).
+ */
+static BOOL RNSCModeIsSupported(NSString *mode)
+{
+    return [mode isEqualToString:@"view"] || [mode isEqualToString:@"auto"];
+}
+
 RCT_EXPORT_METHOD(getPermissionStatus:(NSString *)mode
                               resolve:(RCTPromiseResolveBlock)resolve
                                reject:(RCTPromiseRejectBlock)reject)
 {
-    resolve([mode isEqualToString:@"view"] ? @"granted" : @"unavailable");
+    resolve(RNSCModeIsSupported(mode) ? @"granted" : @"unavailable");
 }
 
 RCT_EXPORT_METHOD(requestPermission:(NSString *)mode
                             resolve:(RCTPromiseResolveBlock)resolve
                              reject:(RCTPromiseRejectBlock)reject)
 {
-    resolve([mode isEqualToString:@"view"] ? @"granted" : @"unavailable");
+    resolve(RNSCModeIsSupported(mode) ? @"granted" : @"unavailable");
 }
 
 RCT_EXPORT_METHOD(openAccessibilitySettings:(RCTPromiseResolveBlock)resolve
@@ -201,7 +211,7 @@ RCT_EXPORT_METHOD(isModeAvailable:(NSString *)mode
                           resolve:(RCTPromiseResolveBlock)resolve
                            reject:(RCTPromiseRejectBlock)reject)
 {
-    resolve(@([mode isEqualToString:@"view"]));
+    resolve(@(RNSCModeIsSupported(mode)));
 }
 
 #pragma mark - frame providers

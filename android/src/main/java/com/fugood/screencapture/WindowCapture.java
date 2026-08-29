@@ -251,18 +251,26 @@ final class WindowCapture {
             decor.getViewTreeObserver().registerFrameCommitCallback(committed[0]);
             UI.postDelayed(guarded, FRAME_COMMIT_TIMEOUT_MS);
         } else {
+            // View.post() on a detached decor is held by ViewRootImpl until re-attach, which
+            // may never come -- and there is no API to take it back. So the queued runnable
+            // reaches `guarded` through a slot the deadline can empty, and what it would have
+            // pinned (activity, decor, overlays, Promise) is released either way.
+            final Runnable[] pending = new Runnable[1];
             final Runnable guarded = new Runnable() {
                 @Override
                 public void run() {
                     if (!done.compareAndSet(false, true)) return;
                     UI.removeCallbacks(this);
+                    pending[0] = null;
                     action.run();
                 }
             };
+            pending[0] = guarded;
             decor.post(new Runnable() {
                 @Override
                 public void run() {
-                    UI.postDelayed(guarded, FRAME_FALLBACK_DELAY_MS);
+                    Runnable next = pending[0];
+                    if (next != null) UI.postDelayed(next, FRAME_FALLBACK_DELAY_MS);
                 }
             });
             UI.postDelayed(guarded, FRAME_COMMIT_TIMEOUT_MS + FRAME_FALLBACK_DELAY_MS);

@@ -145,6 +145,9 @@ adb shell run-as <package> ls cache/
 adb shell run-as <package> cat cache/<file>.png > ./out.png
 ```
 
+`devicectl device info files` sorts alphabetically, not by time, so `tail -1` is not the
+capture you just took -- read the timestamp column.
+
 `run-as ... cat` will happily hand you a half-written file if you race the encode: a PNG that
 fails to parse means "too early", not "broken capture". Re-pull before believing it.
 

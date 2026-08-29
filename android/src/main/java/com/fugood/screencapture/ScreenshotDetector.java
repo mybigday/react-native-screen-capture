@@ -70,10 +70,11 @@ final class ScreenshotDetector implements LifecycleEventListener {
     public void onHostResume() {
         if (listener == null) return;
         Activity current = context.getCurrentActivity();
+        if (current == null) return;
         boolean activityChanged = callback != null && registeredActivity != null
             && registeredActivity.get() != current;
         boolean canUpgrade = callback == null && legacyManager != null
-            && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && current != null;
+            && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
         if (activityChanged || canUpgrade) {
             unbind();
             bind();

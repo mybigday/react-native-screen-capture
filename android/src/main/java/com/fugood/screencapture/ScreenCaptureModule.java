@@ -90,9 +90,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         // also let it go stale across the service's retry or a rotation.
         final boolean cropStatusBar = MODE_ACCESSIBILITY.equals(mode) && excludeStatusBar;
 
-        // Settle-once: the accessibility service reports its synchronous failures through this
-        // same callback, so a throw out of the reject below must not become a second settle.
-        final CaptureCallback onBitmap = WindowCapture.once(new CaptureCallback() {
+        final CaptureCallback onBitmap = new CaptureCallback() {
             @Override
             public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
                 if (bitmap == null) {
@@ -101,16 +99,18 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                 }
                 encode(bitmap, extension, quality, scale, includeBase64, cropStatusBar, promise);
             }
-        });
+        };
 
         if (MODE_ACCESSIBILITY.equals(mode)) {
-            // The view path settles through WindowCapture's guarded runnable; this one has to
-            // guard itself or a throw here leaves the Promise pending forever. onBitmap is
-            // settle-once, so this cannot reject a Promise that has already been settled.
+            // WindowCapture.capture() owns this guarantee for the view path; the accessibility
+            // path has to arrange it here. Without the wrap, a throw out of the service's own
+            // synchronous settle would come back through the catch as a second settle; without
+            // the catch, it would leave the Promise pending forever.
+            final CaptureCallback guarded = WindowCapture.once(onBitmap);
             try {
-                ScreenCaptureAccessibilityService.capture(onBitmap);
+                ScreenCaptureAccessibilityService.capture(guarded);
             } catch (Throwable t) {
-                onBitmap.onResult(null, String.valueOf(t.getMessage()));
+                guarded.onResult(null, String.valueOf(t.getMessage()));
             }
             return;
         }
@@ -232,7 +232,10 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             promise.resolve("granted");
             return;
         }
-        if (!ScreenCaptureAccessibilityService.isSupported()) {
+        if (!ScreenCaptureAccessibilityService.isSupported()
+            || !ScreenCaptureAccessibilityService.isDeclared(reactContext)) {
+            // A service the host app never declared can never be granted, so reporting "denied"
+            // would send it round a loop no user action can end.
             promise.resolve("unavailable");
             return;
         }
@@ -326,15 +329,40 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
 
     @Override
     @ReactMethod
-    public void clearCache(Promise promise) {
-        int removed = 0;
-        File[] files = reactContext.getCacheDir().listFiles();
-        if (files != null) {
-            for (File file : files) {
-                if (file.getName().startsWith(FILE_PREFIX) && file.delete()) removed++;
+    public void clearCache(final Promise promise) {
+        // On the new architecture TurboModule methods run on the JS thread. Listing the cache
+        // and unlinking one file per capture is real syscall work -- after a burst of PNGs it
+        // is dozens of them -- so it goes to the same executor the encoder uses.
+        final Runnable work = new Runnable() {
+            @Override
+            public void run() {
+                int removed = 0;
+                Throwable failure = null;
+                try {
+                    File[] files = reactContext.getCacheDir().listFiles();
+                    if (files != null) {
+                        for (File file : files) {
+                            if (file.getName().startsWith(FILE_PREFIX) && file.delete()) removed++;
+                        }
+                    }
+                } catch (Throwable t) {
+                    failure = t;
+                }
+                // Outside the try, as everywhere else here: settling must not be able to settle
+                // again through the catch.
+                if (failure != null) {
+                    promise.reject(E_CAPTURE, String.valueOf(failure.getMessage()), failure);
+                } else {
+                    promise.resolve(removed);
+                }
             }
+        };
+        try {
+            encoder.execute(work);
+        } catch (RejectedExecutionException e) {
+            // invalidate() shuts the encoder down.
+            promise.reject(E_CAPTURE, "Module is shutting down", e);
         }
-        promise.resolve(removed);
     }
 
     @Override

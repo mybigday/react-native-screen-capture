@@ -75,20 +75,45 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
 
 #pragma mark - Internals
 
+/** Identifiers of providers that have already exhausted the frame-wait budget once. */
++ (NSMutableSet<NSString *> *)hopelessProviders
+{
+    static NSMutableSet<NSString *> *set;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        set = [NSMutableSet set];
+    });
+    return set;
+}
+
 + (void)waitForFrames:(NSArray<id<RNSCFrameProvider>> *)providers
               attempt:(NSInteger)attempt
                  then:(void (^)(void))next
 {
-    if (providers.count == 0 || attempt >= kMaxFrameWaitAttempts) {
+    if (providers.count == 0) {
+        next();
+        return;
+    }
+    if (attempt >= kMaxFrameWaitAttempts) {
+        // Remember who ran the budget out. A provider that can never deliver -- DRM content,
+        // a camera session that refused an output -- would otherwise cost every capture for the
+        // rest of the app's life the full wait, silently.
+        for (id<RNSCFrameProvider> provider in providers) {
+            if (!provider.hasFrame) [[self hopelessProviders] addObject:provider.identifier];
+        }
         next();
         return;
     }
     BOOL ready = YES;
     for (id<RNSCFrameProvider> provider in providers) {
-        if (!provider.hasFrame) {
-            ready = NO;
-            break;
+        if (provider.hasFrame) {
+            // It recovered: start blocking on it again.
+            [[self hopelessProviders] removeObject:provider.identifier];
+            continue;
         }
+        if ([[self hopelessProviders] containsObject:provider.identifier]) continue;
+        ready = NO;
+        break;
     }
     if (ready) {
         next();

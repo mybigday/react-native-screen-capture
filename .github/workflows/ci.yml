@@ -239,10 +239,9 @@ jobs:
         # React Native builds, so go through bundler rather than the runner's system pods.
         uses: ruby/setup-ruby@v1
         with:
+          # The version comes from example/.ruby-version. Pinning it here as well would let the
+          # two drift, and setup-ruby needs no pin once it can read that file.
           working-directory: example
-          # setup-ruby refuses to guess: without this (or a .ruby-version file) it errors out
-          # before the build even starts.
-          ruby-version: '3.3'
           bundler-cache: true
 
       - name: Cache CocoaPods

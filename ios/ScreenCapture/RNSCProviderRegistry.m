@@ -15,6 +15,16 @@
 /** How long the providers stay attached after the last capture. */
 static const NSTimeInterval kIdleDetachDelay = 3.0;
 
+/** The media layer classes discovery and dumpHierarchy both have to recognise. */
+typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
+    RNSCMediaLayerKindNone = 0,
+#if !TARGET_OS_TV
+    RNSCMediaLayerKindCameraPreview,
+#endif
+    RNSCMediaLayerKindPlayer,
+    RNSCMediaLayerKindSampleBufferDisplay,
+};
+
 @implementation RNSCProviderRegistry {
     NSMutableDictionary<NSString *, id<RNSCFrameProvider>> *_providers;
     NSTimer *_idleTimer;
@@ -116,42 +126,78 @@ static const NSTimeInterval kIdleDetachDelay = 3.0;
     for (UIView *subview in view.subviews) [self discoverInView:subview into:found];
 }
 
-- (void)inspectLayer:(CALayer *)layer
-             forView:(UIView *)view
-                into:(NSMutableArray<id<RNSCFrameProvider>> *)found
+/**
+ * Walks a view's own layers and reports the media ones.
+ *
+ * <p>Discovery and {@code dumpHierarchy} must agree on what counts as a media layer, or the
+ * dump starts claiming components that capture cannot actually reach. They share this walk so
+ * that adding a layer class is one edit, not two that have to stay in step.
+ */
+- (void)enumerateMediaLayersIn:(CALayer *)layer
+                         using:(void (^)(CALayer *layer, RNSCMediaLayerKind kind))block
 {
+    RNSCMediaLayerKind kind = RNSCMediaLayerKindNone;
 #if !TARGET_OS_TV
     if ([layer isKindOfClass:AVCaptureVideoPreviewLayer.class]) {
-        AVCaptureVideoPreviewLayer *preview = (AVCaptureVideoPreviewLayer *)layer;
-        if (preview.session) {
-            [self addProviderWithIdentifier:[NSString stringWithFormat:@"camera:%p", preview.session]
-                                       into:found
-                                    builder:^id<RNSCFrameProvider> {
-                return [[RNSCCameraFrameProvider alloc] initWithPreviewLayer:preview targetView:view];
-            }];
-        }
+        kind = RNSCMediaLayerKindCameraPreview;
     } else
 #endif
     if ([layer isKindOfClass:AVPlayerLayer.class]) {
-        AVPlayerLayer *playerLayer = (AVPlayerLayer *)layer;
-        if (playerLayer.player) {
-            [self addProviderWithIdentifier:[NSString stringWithFormat:@"player:%p", playerLayer.player]
-                                       into:found
-                                    builder:^id<RNSCFrameProvider> {
-                return [[RNSCPlayerFrameProvider alloc]
-                    initWithPlayer:playerLayer.player
-                        targetView:view
-                        mediaLayer:playerLayer
-                           gravity:RNSCContentsGravityForVideoGravity(playerLayer.videoGravity)];
-            }];
-        }
+        kind = RNSCMediaLayerKindPlayer;
+    } else if ([NSStringFromClass(layer.class) containsString:@"AVSampleBufferDisplayLayer"]) {
+        kind = RNSCMediaLayerKindSampleBufferDisplay;
     }
+    if (kind != RNSCMediaLayerKindNone) block(layer, kind);
 
     for (CALayer *sublayer in layer.sublayers) {
         // Subviews own their layers; discoverInView: will reach those on its own.
         if ([sublayer.delegate isKindOfClass:UIView.class]) continue;
-        [self inspectLayer:sublayer forView:view into:found];
+        [self enumerateMediaLayersIn:sublayer using:block];
     }
+}
+
+- (void)inspectLayer:(CALayer *)layer
+             forView:(UIView *)view
+                into:(NSMutableArray<id<RNSCFrameProvider>> *)found
+{
+    [self enumerateMediaLayersIn:layer using:^(CALayer *media, RNSCMediaLayerKind kind) {
+        switch (kind) {
+#if !TARGET_OS_TV
+            case RNSCMediaLayerKindCameraPreview: {
+                AVCaptureVideoPreviewLayer *preview = (AVCaptureVideoPreviewLayer *)media;
+                if (!preview.session) return;
+                NSString *identifier =
+                    [NSString stringWithFormat:@"camera:%p", preview.session];
+                [self addProviderWithIdentifier:identifier
+                                           into:found
+                                        builder:^id<RNSCFrameProvider> {
+                    return [[RNSCCameraFrameProvider alloc] initWithPreviewLayer:preview
+                                                                      targetView:view];
+                }];
+                return;
+            }
+#endif
+            case RNSCMediaLayerKindPlayer: {
+                AVPlayerLayer *playerLayer = (AVPlayerLayer *)media;
+                if (!playerLayer.player) return;
+                NSString *identifier =
+                    [NSString stringWithFormat:@"player:%p", playerLayer.player];
+                [self addProviderWithIdentifier:identifier
+                                           into:found
+                                        builder:^id<RNSCFrameProvider> {
+                    return [[RNSCPlayerFrameProvider alloc]
+                        initWithPlayer:playerLayer.player
+                            targetView:view
+                            mediaLayer:playerLayer
+                               gravity:RNSCContentsGravityForVideoGravity(playerLayer.videoGravity)];
+                }];
+                return;
+            }
+            default:
+                // Recognised by the dump, not yet captured.
+                return;
+        }
+    }];
 }
 
 - (void)addProviderWithIdentifier:(NSString *)identifier
@@ -209,20 +255,24 @@ static const NSTimeInterval kIdleDetachDelay = 3.0;
 
 - (void)describeMediaLayersIn:(CALayer *)layer into:(NSMutableString *)out
 {
+    [self enumerateMediaLayersIn:layer using:^(CALayer *media, RNSCMediaLayerKind kind) {
+        switch (kind) {
 #if !TARGET_OS_TV
-    if ([layer isKindOfClass:AVCaptureVideoPreviewLayer.class]) {
-        [out appendString:@"  <- AVCaptureVideoPreviewLayer, captured via AVCaptureVideoDataOutput"];
-    } else
+            case RNSCMediaLayerKindCameraPreview:
+                [out appendString:
+                    @"  <- AVCaptureVideoPreviewLayer, captured via AVCaptureVideoDataOutput"];
+                return;
 #endif
-    if ([layer isKindOfClass:AVPlayerLayer.class]) {
-        [out appendString:@"  <- AVPlayerLayer, captured via AVPlayerItemVideoOutput"];
-    } else if ([NSStringFromClass(layer.class) containsString:@"AVSampleBufferDisplayLayer"]) {
-        [out appendString:@"  <- AVSampleBufferDisplayLayer, NOT captured yet"];
-    }
-    for (CALayer *sublayer in layer.sublayers) {
-        if ([sublayer.delegate isKindOfClass:UIView.class]) continue;
-        [self describeMediaLayersIn:sublayer into:out];
-    }
+            case RNSCMediaLayerKindPlayer:
+                [out appendString:@"  <- AVPlayerLayer, captured via AVPlayerItemVideoOutput"];
+                return;
+            case RNSCMediaLayerKindSampleBufferDisplay:
+                [out appendString:@"  <- AVSampleBufferDisplayLayer, NOT captured yet"];
+                return;
+            case RNSCMediaLayerKindNone:
+                return;
+        }
+    }];
 }
 
 @end

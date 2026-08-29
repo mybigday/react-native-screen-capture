@@ -155,10 +155,16 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                         if (hardware == null) {
                             error = "Could not wrap the screenshot buffer";
                         } else {
-                            // The hardware bitmap dies with the buffer and cannot be scaled or
-                            // re-encoded, so it has to be copied out before the buffer closes.
-                            bitmap = hardware.copy(Bitmap.Config.ARGB_8888, false);
-                            hardware.recycle();
+                            try {
+                                // The hardware bitmap dies with the buffer and cannot be scaled
+                                // or re-encoded, so it has to be copied out before the buffer
+                                // closes. Copying a full display costs ~18MB and can throw; the
+                                // recycle belongs in a finally or the wrapper outlives it,
+                                // holding a reference to a buffer that is about to be closed.
+                                bitmap = hardware.copy(Bitmap.Config.ARGB_8888, false);
+                            } finally {
+                                hardware.recycle();
+                            }
                             if (bitmap == null) error = "Could not copy the screenshot buffer";
                         }
                     } catch (Throwable t) {
