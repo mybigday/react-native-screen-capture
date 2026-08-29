@@ -101,10 +101,13 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
         // Prefer borrowing: reconfiguring somebody else's live session causes a visible glitch
         // and can fail outright on some presets. Wrapping the delegate disturbs nothing, and we
         // forward every callback so the host keeps working exactly as before.
+        dispatch_queue_t previousQueue = existing.sampleBufferCallbackQueue;
+        os_unfair_lock_lock(&_lock);
         _borrowedOutput = existing;
         _previousDelegate = existing.sampleBufferDelegate;
-        _previousQueue = existing.sampleBufferCallbackQueue;
-        [existing setSampleBufferDelegate:self queue:_previousQueue ?: _queue];
+        _previousQueue = previousQueue;
+        os_unfair_lock_unlock(&_lock);
+        [existing setSampleBufferDelegate:self queue:previousQueue ?: _queue];
         _attached = YES;
         return;
     }
@@ -153,9 +156,14 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
             [_borrowedOutput setSampleBufferDelegate:previous
                                                queue:previous ? _previousQueue : nil];
         }
+        // Under the lock: -captureOutput:... reads these on the capture queue, and a
+        // concurrent read of a __weak ivar while it is being written is an unsafe access to
+        // the weak table, not merely a stale value.
+        os_unfair_lock_lock(&_lock);
         _borrowedOutput = nil;
         _previousDelegate = nil;
         _previousQueue = nil;
+        os_unfair_lock_unlock(&_lock);
     }
 
     if (_ownedOutput) {
@@ -233,6 +241,21 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
 
 #pragma mark - AVCaptureVideoDataOutputSampleBufferDelegate
 
+/**
+ * The host delegate we are forwarding to, read under the lock.
+ *
+ * <p>These callbacks arrive on the capture queue while -detach runs on the main thread. Reading
+ * a __weak ivar concurrently with the write that clears it is an unsafe access to the weak
+ * table, so the load takes the same lock the write does and hands back a strong reference.
+ */
+- (nullable id<AVCaptureVideoDataOutputSampleBufferDelegate>)borrowedDelegate
+{
+    os_unfair_lock_lock(&_lock);
+    id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = _previousDelegate;
+    os_unfair_lock_unlock(&_lock);
+    return previous;
+}
+
 - (void)captureOutput:(AVCaptureOutput *)output
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
            fromConnection:(AVCaptureConnection *)connection
@@ -247,7 +270,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
         if (stale) CVPixelBufferRelease(stale);
     }
 
-    id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = _previousDelegate;
+    id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = [self borrowedDelegate];
     if ([previous respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
         [previous captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
     }
@@ -257,7 +280,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
          fromConnection:(AVCaptureConnection *)connection
 {
-    id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = _previousDelegate;
+    id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = [self borrowedDelegate];
     if ([previous respondsToSelector:@selector(captureOutput:didDropSampleBuffer:fromConnection:)]) {
         [previous captureOutput:output didDropSampleBuffer:sampleBuffer fromConnection:connection];
     }

@@ -71,11 +71,16 @@ final class ScreenshotDetector implements LifecycleEventListener {
         if (listener == null) return;
         Activity current = context.getCurrentActivity();
         if (current == null) return;
+        // onHostDestroy() unbinds both paths, so "nothing is bound" is a state a live listener
+        // can be left in: without this case a destroyed-then-recreated activity would end
+        // detection for the rest of the React instance's life, silently -- the JS promise from
+        // startScreenshotDetection() resolved long ago.
+        boolean unbound = callback == null && legacyManager == null;
         boolean activityChanged = callback != null && registeredActivity != null
             && registeredActivity.get() != current;
         boolean canUpgrade = callback == null && legacyManager != null
             && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
-        if (activityChanged || canUpgrade) {
+        if (unbound || activityChanged || canUpgrade) {
             unbind();
             bind();
         }

@@ -55,6 +55,9 @@ final class WindowCapture {
     /** Deadline for the per-surface copies, which can also be dropped without a callback. */
     private static final long SURFACE_COPY_TIMEOUT_MS = 1500L;
 
+    /** Deadline for the whole-window read-back, for the same reason. */
+    private static final long WINDOW_COPY_TIMEOUT_MS = 2000L;
+
     private WindowCapture() {
     }
 
@@ -289,12 +292,26 @@ final class WindowCapture {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             final Bitmap out = Bitmap.createBitmap(width, outHeight, Bitmap.Config.ARGB_8888);
+            // Same hazard as the two hops before it: a window whose surface is destroyed
+            // between the request and the copy leaves the listener uncalled, and this listener
+            // is the only thing that takes the overlays back off the SurfaceViews. Without a
+            // deadline the user is left looking at frozen stills over live video.
+            final Runnable deadline = new Runnable() {
+                @Override
+                public void run() {
+                    removeOverlays(overlays);
+                    callback.onResult(null, "PixelCopy did not report a result in time");
+                }
+            };
             try {
                 PixelCopy.request(window, new Rect(0, top, width, height), out,
                     new PixelCopy.OnPixelCopyFinishedListener() {
                         @Override
                         public void onPixelCopyFinished(int copyResult) {
+                            UI.removeCallbacks(deadline);
                             removeOverlays(overlays);
+                            // A copy that lands after the deadline settles through once(),
+                            // which drops it and recycles the bitmap.
                             if (copyResult == PixelCopy.SUCCESS) {
                                 callback.onResult(out, null);
                             } else {
@@ -303,7 +320,9 @@ final class WindowCapture {
                             }
                         }
                     }, UI);
+                UI.postDelayed(deadline, WINDOW_COPY_TIMEOUT_MS);
             } catch (IllegalArgumentException e) {
+                UI.removeCallbacks(deadline);
                 removeOverlays(overlays);
                 out.recycle();
                 callback.onResult(null, String.valueOf(e.getMessage()));

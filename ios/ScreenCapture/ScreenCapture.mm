@@ -101,6 +101,8 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
             resolve:(RCTPromiseResolveBlock)resolve
              reject:(RCTPromiseRejectBlock)reject
 {
+    NSMutableDictionary *result = nil;
+    NSString *failure = nil;
     @try {
         UIImage *output = (scale > 0 && scale != 1.0) ? [self scaleImage:image by:scale] : image;
 
@@ -108,17 +110,17 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
         NSData *data = isJPEG ? UIImageJPEGRepresentation(output, MAX(0.0, MIN(1.0, quality / 100.0)))
                               : UIImagePNGRepresentation(output);
         if (!data) {
-            reject(kErrorCapture, @"Could not encode the image", nil);
+            failure = @"Could not encode the image";
             return;
         }
 
         NSString *path = [self writeData:data extension:isJPEG ? @"jpg" : @"png"];
         if (!path) {
-            reject(kErrorCapture, @"Could not write the image to the cache directory", nil);
+            failure = @"Could not write the image to the cache directory";
             return;
         }
 
-        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result = [NSMutableDictionary dictionary];
         result[@"uri"] = [@"file://" stringByAppendingString:path];
         // From the CGImage, not size * scale: the renderer rounds fractional point sizes, so a
         // scaled capture would otherwise report a non-integer width that disagrees with the
@@ -131,9 +133,16 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
         if (includeBase64) {
             result[@"base64"] = [data base64EncodedStringWithOptions:0];
         }
-        resolve(result);
     } @catch (NSException *exception) {
-        reject(kErrorCapture, exception.reason ?: @"Capture failed", nil);
+        result = nil;
+        failure = exception.reason ?: @"Capture failed";
+    }
+    // Outside the @try, as on the Android side: a throw out of settling must not come back
+    // through the @catch and settle the same Promise a second time.
+    if (result) {
+        resolve(result);
+    } else {
+        reject(kErrorCapture, failure ?: @"Capture failed", nil);
     }
 }
 
@@ -244,17 +253,22 @@ RCT_EXPORT_METHOD(coolDown:(RCTPromiseResolveBlock)resolve
 RCT_EXPORT_METHOD(clearCache:(RCTPromiseResolveBlock)resolve
                       reject:(RCTPromiseRejectBlock)reject)
 {
+    // The module declares no methodQueue, so on the new architecture this body runs on the JS
+    // thread. Listing the folder and unlinking one multi-megabyte file per capture is real
+    // syscall work; the Android side moves the same work to its encoder executor.
     NSString *folder = [self cacheFolder];
-    NSFileManager *manager = NSFileManager.defaultManager;
-    NSUInteger removed = 0;
-    if (folder) {
-        NSArray<NSString *> *names = [manager contentsOfDirectoryAtPath:folder error:NULL];
-        for (NSString *name in names) {
-            NSString *path = [folder stringByAppendingPathComponent:name];
-            if ([manager removeItemAtPath:path error:NULL]) removed++;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSFileManager *manager = [[NSFileManager alloc] init];
+        NSUInteger removed = 0;
+        if (folder) {
+            NSArray<NSString *> *names = [manager contentsOfDirectoryAtPath:folder error:NULL];
+            for (NSString *name in names) {
+                NSString *path = [folder stringByAppendingPathComponent:name];
+                if ([manager removeItemAtPath:path error:NULL]) removed++;
+            }
         }
-    }
-    resolve(@(removed));
+        resolve(@(removed));
+    });
 }
 
 RCT_EXPORT_METHOD(startScreenshotDetection:(RCTPromiseResolveBlock)resolve

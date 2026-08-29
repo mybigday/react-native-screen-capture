@@ -45,21 +45,18 @@ Every technique in that list is drawing the app's own process performs. AVFounda
 not a drawing technique at all, which is why they are absent. The sentence is true and still
 misleading.
 
-### `capture()` drops unknown option keys
+### An A/B that does not actually differ
 
-`src/index.ts` rebuilds the options object from known keys before calling native. A debug flag
-added to a `capture()` call therefore never reaches the native side. This silently turned an
-A/B test into a comparison of two identical runs and produced a confidently wrong conclusion
-that survived several rounds. If you need to pass something experimental, call the native module
-directly:
+`capture()` used to rebuild its options object from known keys, so a debug flag added to a
+`capture()` call never reached native. That silently turned an A/B test into a comparison of two
+identical runs and produced a confidently wrong conclusion that survived several rounds.
 
-```ts
-const Native: any = TurboModuleRegistry.getEnforcing('ScreenCapture')
-await Native.capture({ mode: 'view', extension: 'png', quality: 100, scale: 1,
-                       excludeStatusBar: false, includeBase64: false, __yourFlag: true })
-```
+It now spreads the caller's object, so extra keys *do* reach native and a flag passed through
+`capture()` arrives. The lesson outlives the bug:
 
 **Always sanity-check that an A/B actually differs in the way you intended before believing it.**
+Assert the two runs took different code paths -- a log line from the native branch, a
+deliberately broken control -- rather than inferring it from the numbers.
 
 ### Bundling successfully is not the same as running
 

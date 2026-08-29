@@ -75,15 +75,22 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
 
 #pragma mark - Internals
 
-/** Identifiers of providers that have already exhausted the frame-wait budget once. */
-+ (NSMutableSet<NSString *> *)hopelessProviders
+/**
+ * Providers that have already exhausted the frame-wait budget once.
+ *
+ * <p>Keyed on the provider object, not its identifier: identifiers are built from `%p`, so a
+ * new AVPlayer landing on a freed one's address would otherwise inherit its verdict and never
+ * be waited for again. Weak membership also means the table empties itself as providers die,
+ * rather than growing for the life of the process.
+ */
++ (NSHashTable<id<RNSCFrameProvider>> *)hopelessProviders
 {
-    static NSMutableSet<NSString *> *set;
+    static NSHashTable *table;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        set = [NSMutableSet set];
+        table = [NSHashTable weakObjectsHashTable];
     });
-    return set;
+    return table;
 }
 
 + (void)waitForFrames:(NSArray<id<RNSCFrameProvider>> *)providers
@@ -99,21 +106,23 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
         // a camera session that refused an output -- would otherwise cost every capture for the
         // rest of the app's life the full wait, silently.
         for (id<RNSCFrameProvider> provider in providers) {
-            if (!provider.hasFrame) [[self hopelessProviders] addObject:provider.identifier];
+            if (!provider.hasFrame) [[self hopelessProviders] addObject:provider];
         }
         next();
         return;
     }
     BOOL ready = YES;
     for (id<RNSCFrameProvider> provider in providers) {
+        // No early exit: -hasFrame is what pumps a player provider, so breaking here would
+        // leave everything behind the first not-ready provider unpumped for the whole budget
+        // and then declared hopeless off a single pump at the end.
         if (provider.hasFrame) {
             // It recovered: start blocking on it again.
-            [[self hopelessProviders] removeObject:provider.identifier];
+            [[self hopelessProviders] removeObject:provider];
             continue;
         }
-        if ([[self hopelessProviders] containsObject:provider.identifier]) continue;
+        if ([[self hopelessProviders] containsObject:provider]) continue;
         ready = NO;
-        break;
     }
     if (ready) {
         next();
@@ -193,9 +202,16 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     placeholder.contentsGravity = provider.contentsGravity;
     placeholder.masksToBounds = YES;
     // Set bounds/position rather than frame: frame is undefined once a transform is applied.
-    placeholder.bounds = CGRectMake(0, 0, CGRectGetWidth(rect), CGRectGetHeight(rect));
+    // A quarter turn has to swap the layer's bounds as well: rotating a rect-shaped layer about
+    // its centre leaves it overhanging the media rect with the aspect transposed. Only rotations
+    // that are multiples of 90 are produced here, so a near-zero m11 identifies the odd ones.
+    CATransform3D transform = provider.contentsTransform;
+    BOOL quarterTurn = fabs(transform.m11) < 0.5;
+    CGFloat boundsWidth = quarterTurn ? CGRectGetHeight(rect) : CGRectGetWidth(rect);
+    CGFloat boundsHeight = quarterTurn ? CGRectGetWidth(rect) : CGRectGetHeight(rect);
+    placeholder.bounds = CGRectMake(0, 0, boundsWidth, boundsHeight);
     placeholder.position = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
-    placeholder.transform = provider.contentsTransform;
+    placeholder.transform = transform;
     CGImageRelease(frame);
 
     if (media && media.superlayer) {

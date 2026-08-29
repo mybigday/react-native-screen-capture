@@ -1,10 +1,15 @@
 /*
  * Copyright (c) 2018 LewinJun
  *
- * Taken unmodified from react-native-lewin-screen-capture, the project this one was forked
- * from. It is the pre-Android-14 screenshot detection fallback: watch MediaStore for a new
- * file whose name looks like a screenshot. Unreliable under scoped storage, which is why
- * ScreenshotDetector prefers Activity#registerScreenCaptureCallback on API 34+.
+ * Taken from react-native-lewin-screen-capture, the project this one was forked from. It is
+ * the pre-Android-14 screenshot detection fallback: watch MediaStore for a new file whose name
+ * looks like a screenshot. Unreliable under scoped storage, which is why ScreenshotDetector
+ * prefers Activity#registerScreenCaptureCallback on API 34+.
+ *
+ * One change from the original: the content observers ran on the main looper, so every image
+ * written by any app on the device -- not just screenshots -- performed a cross-process
+ * MediaStore query, and sometimes a bitmap decode, on the UI thread. They now run on a private
+ * background thread and only the listener callback is posted back to the main thread.
  *
  * Licensed under the MIT License; see LICENSE at the root of this repository.
  */
@@ -18,6 +23,7 @@ import android.graphics.Point;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.provider.MediaStore;
 import android.text.TextUtils;
@@ -87,6 +93,9 @@ public class ScreenCapturetListenManager {
      */
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
 
+    /** Carries the MediaStore queries off the UI thread; started and quit with the listening. */
+    private HandlerThread mObserverThread;
+
     private ScreenCapturetListenManager(Context context, String[] fileKeyWords) {
         if (context == null) {
             throw new IllegalArgumentException("The context must not be null.");
@@ -122,8 +131,11 @@ public class ScreenCapturetListenManager {
         mStartListenTime = System.currentTimeMillis();
 
         // 创建内容观察者
-        mInternalObserver = new MediaContentObserver(MediaStore.Images.Media.INTERNAL_CONTENT_URI, mUiHandler);
-        mExternalObserver = new MediaContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mUiHandler);
+        mObserverThread = new HandlerThread("rnsc-screenshot-observer");
+        mObserverThread.start();
+        Handler observerHandler = new Handler(mObserverThread.getLooper());
+        mInternalObserver = new MediaContentObserver(MediaStore.Images.Media.INTERNAL_CONTENT_URI, observerHandler);
+        mExternalObserver = new MediaContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, observerHandler);
 
         // 注册内容观察者
         mContext.getContentResolver().registerContentObserver(
@@ -160,6 +172,11 @@ public class ScreenCapturetListenManager {
                 e.printStackTrace();
             }
             mExternalObserver = null;
+        }
+
+        if (mObserverThread != null) {
+            mObserverThread.quitSafely();
+            mObserverThread = null;
         }
 
         // 清空数据
@@ -244,7 +261,15 @@ public class ScreenCapturetListenManager {
             Log.e("ScreenCapture","ScreenShot: path = " + data + "; size = " + width + " * " + height
                     + "; date = " + dateTaken);
             if (mListener != null && !checkCallback(data)) {
-                mListener.onShot(data);
+                // The query above runs on the observer thread; the listener does not.
+                final OnScreenCapturetListen listener = mListener;
+                final String path = data;
+                mUiHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        listener.onShot(path);
+                    }
+                });
             }
         } else {
             // 如果在观察区间媒体数据库有数据改变，又不符合截屏规则，则输出到 log 待分析
