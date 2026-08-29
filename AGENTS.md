@@ -133,11 +133,25 @@ it.
 Pull the PNGs off the device rather than reading a preview:
 
 ```sh
-# iOS
+# iOS -- the flag is --user, not --username, and it must be `mobile`.
+xcrun devicectl device info files --device <udid> --domain-type appDataContainer \
+  --domain-identifier <bundle-id> --user mobile | grep react-native-screen-capture
 xcrun devicectl device copy from --device <udid> --domain-type appDataContainer \
-  --domain-identifier <bundle-id> \
+  --domain-identifier <bundle-id> --user mobile \
   --source Library/Caches/react-native-screen-capture/<file>.png --destination ./out.png
+
+# Android
+adb shell run-as <package> ls cache/
+adb shell run-as <package> cat cache/<file>.png > ./out.png
 ```
+
+`run-as ... cat` will happily hand you a half-written file if you race the encode: a PNG that
+fails to parse means "too early", not "broken capture". Re-pull before believing it.
+
+Reading the example app's own on-screen state is harder than it looks: `uiautomator dump` times
+out on the Fabric view tree, so read the counters and labels off a `screencap` instead. And
+`am start` after backgrounding recreates the activity, which resets React state -- if a test
+depends on a toggle staying on, do not leave the app in between.
 
 `dumpHierarchy()` tells you whether a component was matched *and* whether its frame pipeline is
 delivering (`hasFrame`). A matched component with `hasFrame=no` means the placeholder is a no-op,
