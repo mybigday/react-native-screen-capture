@@ -21,6 +21,7 @@ import androidx.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -48,10 +49,17 @@ final class WindowCapture {
     /** How long to wait for the post-overlay frame on API < 29, where there is no commit callback. */
     private static final long FRAME_FALLBACK_DELAY_MS = 32L;
 
+    /** Deadline for the API 29+ frame-commit callback, which is not guaranteed to fire. */
+    private static final long FRAME_COMMIT_TIMEOUT_MS = 250L;
+
     private WindowCapture() {
     }
 
-    static void capture(final Activity activity, final boolean excludeStatusBar, final CaptureCallback callback) {
+    static void capture(final Activity activity, final boolean excludeStatusBar,
+                        final CaptureCallback rawCallback) {
+        // Every path below settles through this, so a throw escaping a callback cannot come back
+        // round through a catch and settle the Promise a second time.
+        final CaptureCallback callback = once(rawCallback);
         if (activity == null) {
             callback.onResult(null, "No current activity");
             return;
@@ -66,6 +74,20 @@ final class WindowCapture {
                 }
             }
         });
+    }
+
+    private static CaptureCallback once(final CaptureCallback delegate) {
+        final AtomicBoolean settled = new AtomicBoolean(false);
+        return new CaptureCallback() {
+            @Override
+            public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
+                if (settled.compareAndSet(false, true)) {
+                    delegate.onResult(bitmap, error);
+                } else if (bitmap != null) {
+                    bitmap.recycle();
+                }
+            }
+        };
     }
 
     private static void captureOnUiThread(final Activity activity, final boolean excludeStatusBar,
@@ -135,8 +157,10 @@ final class WindowCapture {
                         if (pending.decrementAndGet() == 0) done.run();
                     }
                 }, UI);
-            } catch (IllegalArgumentException e) {
-                // Surface not yet created.
+            } catch (Throwable t) {
+                // Surface not created yet, or the allocation failed. Either way this view has to
+                // count down: otherwise `done` never runs, the window is never read back, and the
+                // overlays installed so far are never removed.
                 bitmap.recycle();
                 if (pending.decrementAndGet() == 0) done.run();
             }
@@ -147,12 +171,22 @@ final class WindowCapture {
     private static void afterNextFrame(final View decor, final Runnable action) {
         decor.invalidate();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // A window that has stopped drawing never commits, and without a deadline the
+            // capture would hang forever with the overlays still installed.
+            final AtomicBoolean done = new AtomicBoolean(false);
+            final Runnable guarded = new Runnable() {
+                @Override
+                public void run() {
+                    if (done.compareAndSet(false, true)) action.run();
+                }
+            };
             decor.getViewTreeObserver().registerFrameCommitCallback(new Runnable() {
                 @Override
                 public void run() {
-                    UI.post(action);
+                    UI.post(guarded);
                 }
             });
+            UI.postDelayed(guarded, FRAME_COMMIT_TIMEOUT_MS);
         } else {
             decor.post(new Runnable() {
                 @Override

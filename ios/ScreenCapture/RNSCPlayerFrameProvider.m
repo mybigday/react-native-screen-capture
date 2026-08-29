@@ -120,7 +120,15 @@ static void *kCurrentItemContext = &kCurrentItemContext;
     if (!output) return;
 
     CMTime itemTime = [output itemTimeForHostTime:CACurrentMediaTime()];
-    if (![output hasNewPixelBufferForItemTime:itemTime]) return;
+
+    // `hasNewPixelBuffer` is false for a paused player -- its item time does not advance -- but
+    // the currently displayed frame is still there for the taking. Treat the flag as an
+    // optimisation for when we already hold something, not as a precondition.
+    BOOL haveFrame;
+    os_unfair_lock_lock(&_lock);
+    haveFrame = _latest != NULL;
+    os_unfair_lock_unlock(&_lock);
+    if (haveFrame && ![output hasNewPixelBufferForItemTime:itemTime]) return;
 
     CVPixelBufferRef buffer = [output copyPixelBufferForItemTime:itemTime itemTimeForDisplay:NULL];
     if (!buffer) return;

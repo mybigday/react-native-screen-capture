@@ -83,6 +83,9 @@ resolution for every package. The Metro warning it silences is harmless.
   believing an availability claim:
   `platforms/android-<n>/data/api-versions.xml`, where a method with no `since` inherits the
   class's. This has already been reported once as a bug that was not one.
+- `ScreenCapturetListenManager` (the vendored pre-API-34 detector) calls `assertInMainThread()`
+  in `newInstance`/`startListen`/`stopListen`. Anything driving it has to be on the UI thread, and
+  the failure is invisible from JS because `addScreenshotListener` swallows the rejection.
 - `am force-stop` on an app hosting an accessibility service makes the system switch that
   service off. Restart the app instead when testing accessibility mode.
 - Accessibility services are blocked for apps installed outside the Play Store, which includes

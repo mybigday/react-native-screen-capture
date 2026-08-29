@@ -39,10 +39,6 @@ final class ScreenshotDetector {
         this.context = context;
     }
 
-    boolean isRunning() {
-        return listener != null;
-    }
-
     void start(@Nullable Activity activity, Listener listener) {
         stop();
         this.listener = listener;

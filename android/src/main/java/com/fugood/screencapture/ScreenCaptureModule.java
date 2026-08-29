@@ -14,6 +14,7 @@ import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableMap;
+import com.facebook.react.bridge.UiThreadUtil;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
 
@@ -52,7 +53,17 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
 
     @Override
     public void invalidate() {
-        detector.stop();
+        // stop() touches the legacy manager, which is main-thread only, and must not be allowed
+        // to skip the rest of teardown if it throws.
+        UiThreadUtil.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    detector.stop();
+                } catch (Throwable ignored) {
+                }
+            }
+        });
         encoder.shutdown();
         super.invalidate();
     }
@@ -66,7 +77,8 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         final boolean excludeStatusBar =
             options.hasKey("excludeStatusBar") && options.getBoolean("excludeStatusBar");
         final String extension = options.hasKey("extension") ? options.getString("extension") : "png";
-        final int quality = options.hasKey("quality") ? (int) options.getDouble("quality") : 100;
+        final int quality = Math.max(0, Math.min(100,
+            options.hasKey("quality") ? (int) options.getDouble("quality") : 100));
         final double scale = options.hasKey("scale") ? options.getDouble("scale") : 1d;
         final boolean includeBase64 =
             options.hasKey("includeBase64") && options.getBoolean("includeBase64");
@@ -135,11 +147,27 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                     }
 
                     Bitmap.CompressFormat format = compressFormat(extension);
-                    File file = File.createTempFile(FILE_PREFIX, "." + extension,
+                    // Normalised so the URI suffix matches iOS, which always writes .jpg.
+                    String suffix = format == Bitmap.CompressFormat.JPEG ? "jpg" : "png";
+                    File file = File.createTempFile(FILE_PREFIX, "." + suffix,
                         reactContext.getCacheDir());
+
+                    byte[] encoded = null;
+                    if (includeBase64) {
+                        // Encode once and reuse the bytes for both the file and the string;
+                        // compressing twice doubles the cost of every base64 capture.
+                        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                        bitmap.compress(format, quality, buffer);
+                        encoded = buffer.toByteArray();
+                    }
+
                     FileOutputStream out = new FileOutputStream(file);
                     try {
-                        bitmap.compress(format, quality, out);
+                        if (encoded != null) {
+                            out.write(encoded);
+                        } else {
+                            bitmap.compress(format, quality, out);
+                        }
                         out.flush();
                     } finally {
                         out.close();
@@ -149,11 +177,8 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                     result.putString("uri", "file://" + file.getAbsolutePath());
                     result.putInt("width", bitmap.getWidth());
                     result.putInt("height", bitmap.getHeight());
-                    if (includeBase64) {
-                        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                        bitmap.compress(format, quality, buffer);
-                        result.putString("base64",
-                            Base64.encodeToString(buffer.toByteArray(), Base64.NO_WRAP));
+                    if (encoded != null) {
+                        result.putString("base64", Base64.encodeToString(encoded, Base64.NO_WRAP));
                     }
                     promise.resolve(result);
                 } catch (Throwable t) {
@@ -194,9 +219,10 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             promise.resolve("unavailable");
             return;
         }
-        boolean ready = ScreenCaptureAccessibilityService.isConnected()
-            || ScreenCaptureAccessibilityService.isEnabled(reactContext);
-        promise.resolve(ready ? "granted" : "denied");
+        // Only "granted" once the service is actually bound. Enabled-but-not-yet-bound has to
+        // report denied, or `auto` picks accessibility and the capture hard-rejects instead of
+        // falling back to `view`.
+        promise.resolve(ScreenCaptureAccessibilityService.isConnected() ? "granted" : "denied");
     }
 
     @Override
@@ -284,7 +310,17 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
 
     @Override
     @ReactMethod
-    public void startScreenshotDetection(Promise promise) {
+    public void startScreenshotDetection(final Promise promise) {
+        // The pre-API-34 manager asserts it is on the main thread; @ReactMethods are not.
+        UiThreadUtil.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                startDetectionOnUiThread(promise);
+            }
+        });
+    }
+
+    private void startDetectionOnUiThread(final Promise promise) {
         try {
             detector.start(getCurrentActivity(), new ScreenshotDetector.Listener() {
                 @Override
@@ -306,15 +342,29 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
 
     @Override
     @ReactMethod
-    public void stopScreenshotDetection(Promise promise) {
-        detector.stop();
-        promise.resolve(null);
+    public void stopScreenshotDetection(final Promise promise) {
+        UiThreadUtil.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    detector.stop();
+                    promise.resolve(null);
+                } catch (Throwable t) {
+                    promise.reject(E_CAPTURE, String.valueOf(t.getMessage()), t);
+                }
+            }
+        });
     }
 
     @Override
     @ReactMethod
-    public void dumpHierarchy(Promise promise) {
-        promise.resolve(WindowCapture.dump(getCurrentActivity()));
+    public void dumpHierarchy(final Promise promise) {
+        UiThreadUtil.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                promise.resolve(WindowCapture.dump(getCurrentActivity()));
+            }
+        });
     }
 
     @Override

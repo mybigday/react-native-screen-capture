@@ -44,7 +44,11 @@ RCT_EXPORT_MODULE()
 - (void)invalidate
 {
     [self stopScreenshotObserver];
-    [RNSCProviderRegistry.sharedRegistry detachAll];
+    // The registry is main-thread only: its timer lives on the main run loop and its provider
+    // map is mutated during discovery. invalidate() runs on the module's queue.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [RNSCProviderRegistry.sharedRegistry detachAll];
+    });
     [super invalidate];
 }
 
@@ -200,8 +204,12 @@ RCT_EXPORT_METHOD(warmUp:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        [RNSCProviderRegistry.sharedRegistry
-            attachedProvidersForWindows:[RNSCWindowCapture captureWindows]];
+        RNSCProviderRegistry *registry = RNSCProviderRegistry.sharedRegistry;
+        [registry attachedProvidersForWindows:[RNSCWindowCapture captureWindows]];
+        // attachedProvidersForWindows: cancels the idle timer; without re-arming it here a
+        // warmUp() that is never followed by a capture would keep the providers attached for
+        // the life of the app, which is not what the API documents.
+        [registry scheduleIdleDetach];
         resolve(nil);
     });
 }
