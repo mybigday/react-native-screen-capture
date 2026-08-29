@@ -114,7 +114,16 @@
     _attached = NO;
 
     if (_borrowedOutput) {
-        [_borrowedOutput setSampleBufferDelegate:_previousDelegate queue:_previousQueue];
+        // Only put back what we took. If the host swapped its own delegate in while we were
+        // attached, restoring ours would silently disconnect them.
+        if (_borrowedOutput.sampleBufferDelegate == self) {
+            // AVFoundation requires (delegate != nil) == (queue != nil) and raises otherwise.
+            // _previousDelegate is weak, so it can be nil here even though _previousQueue is
+            // still very much alive.
+            id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = _previousDelegate;
+            [_borrowedOutput setSampleBufferDelegate:previous
+                                               queue:previous ? _previousQueue : nil];
+        }
         _borrowedOutput = nil;
         _previousDelegate = nil;
         _previousQueue = nil;

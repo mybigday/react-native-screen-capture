@@ -6,10 +6,11 @@
 #import "RNSCPlayerFrameProvider.h"
 #import <os/lock.h>
 
-static void *kCurrentItemContext = &kCurrentItemContext;
-
 @implementation RNSCPlayerFrameProvider {
-    AVPlayer *_player;
+    // Weak: the registry keeps providers around for a few idle seconds after a capture, and a
+    // strong reference here would keep the host's player -- and its audio -- alive that whole
+    // time after the host had let go of it.
+    __weak AVPlayer *_player;
     __weak UIView *_targetView;
     __weak CALayer *_mediaLayer;
     CALayerContentsGravity _gravity;
@@ -52,7 +53,7 @@ static void *kCurrentItemContext = &kCurrentItemContext;
 
 - (UIView *)targetView { return _targetView; }
 - (CALayer *)mediaLayer { return _mediaLayer; }
-- (BOOL)isAlive { return _targetView != nil; }
+- (BOOL)isAlive { return _targetView != nil && _player != nil; }
 - (CALayerContentsGravity)contentsGravity { return _gravity; }
 - (CATransform3D)contentsTransform { return CATransform3DIdentity; }
 
@@ -62,10 +63,7 @@ static void *kCurrentItemContext = &kCurrentItemContext;
     _output = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:@{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
     }];
-    [_player addObserver:self
-              forKeyPath:@"currentItem"
-                 options:NSKeyValueObservingOptionInitial | NSKeyValueObservingOptionNew
-                 context:kCurrentItemContext];
+    // The output is bound to the current item lazily, in -pump.
     _attached = YES;
 }
 
@@ -73,12 +71,6 @@ static void *kCurrentItemContext = &kCurrentItemContext;
 {
     if (!_attached) return;
     _attached = NO;
-
-    @try {
-        [_player removeObserver:self forKeyPath:@"currentItem" context:kCurrentItemContext];
-    } @catch (NSException *exception) {
-        // Not registered; nothing to do.
-    }
 
     [self detachOutputFromObservedItem];
     _output = nil;
@@ -118,6 +110,7 @@ static void *kCurrentItemContext = &kCurrentItemContext;
 {
     AVPlayerItemVideoOutput *output = _output;
     if (!output) return;
+    [self bindOutputToCurrentItem];
 
     CMTime itemTime = [output itemTimeForHostTime:CACurrentMediaTime()];
 
@@ -140,6 +133,28 @@ static void *kCurrentItemContext = &kCurrentItemContext;
     if (stale) CVPixelBufferRelease(stale);
 }
 
+/**
+ * Binds the output to whatever item the player is on now.
+ *
+ * <p>Polled from -pump rather than driven by KVO on {@code currentItem}: that notification
+ * arrives on whatever thread advanced the queue, which races -detach and -pump, and registering
+ * as an observer is what forced this class to retain the host's player in the first place.
+ * -pump already runs before every read, so the item is never stale by the time it matters.
+ */
+- (void)bindOutputToCurrentItem
+{
+    AVPlayer *player = _player;
+    AVPlayerItem *item = player.currentItem;
+    if (item == _observedItem) return;
+
+    // Playlists swap the item out from under us; move the output across when they do.
+    [self detachOutputFromObservedItem];
+    if (item && ![item.outputs containsObject:_output]) {
+        [item addOutput:_output];
+        _observedItem = item;
+    }
+}
+
 - (void)detachOutputFromObservedItem
 {
     AVPlayerItem *item = _observedItem;
@@ -147,25 +162,6 @@ static void *kCurrentItemContext = &kCurrentItemContext;
         [item removeOutput:_output];
     }
     _observedItem = nil;
-}
-
-- (void)observeValueForKeyPath:(NSString *)keyPath
-                      ofObject:(id)object
-                        change:(NSDictionary<NSKeyValueChangeKey, id> *)change
-                       context:(void *)context
-{
-    if (context != kCurrentItemContext) {
-        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
-        return;
-    }
-    // Playlists swap the item out from under us; move the output across when they do.
-    [self detachOutputFromObservedItem];
-
-    AVPlayerItem *item = _player.currentItem;
-    if (item && _output && ![item.outputs containsObject:_output]) {
-        [item addOutput:_output];
-        _observedItem = item;
-    }
 }
 
 @end

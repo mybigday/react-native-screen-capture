@@ -117,9 +117,26 @@ export function coolDown(): Promise<void> {
   return NativeScreenCapture.coolDown()
 }
 
-/** Removes every file this module has written. Resolves with the count. */
-export function clearCache(): Promise<number> {
-  return NativeScreenCapture.clearCache()
+/**
+ * Removes every file this module has written. Resolves with the count.
+ *
+ * `callback` exists for 1.x callers; it receives the same count and, as in 1.x, is also how a
+ * failure is reported (with 0). New code should use the promise.
+ */
+export function clearCache(callback?: (count: number) => void): Promise<number> {
+  const promise = NativeScreenCapture.clearCache()
+  if (!callback) return promise
+  // 1.x had no promise to catch, so the returned one must not reject either.
+  return promise.then(
+    (count) => {
+      callback(count)
+      return count
+    },
+    () => {
+      callback(0)
+      return 0
+    },
+  )
 }
 
 /** Fires when the *user* takes a screenshot. Does not fire for `capture()`. */
@@ -148,17 +165,33 @@ export function dumpHierarchy(): Promise<string> {
 
 /** @deprecated Use `capture()`. */
 export function screenCapture(
-  callback: (result: CaptureResult & { code: string }) => void,
+  callback: (result: Partial<CaptureResult> & { code: string }) => void,
   excludeStatusBar?: boolean,
   options?: CaptureOptions,
 ): void {
-  capture({ ...options, excludeStatusBar, includeBase64: true })
+  capture({
+    ...options,
+    // 1.x only honoured this argument when it was actually passed, and defaulted to true on
+    // Android. Spreading `options` and then writing an undefined over it would have made the
+    // default false on both platforms.
+    excludeStatusBar: excludeStatusBar ?? options?.excludeStatusBar ?? Platform.OS === 'android',
+    // 1.x spelled "native size" as scale 0; capture() spells it 1.
+    scale: options?.scale || 1,
+    includeBase64: true,
+  })
     .then((r) => callback({ ...r, code: '200' }))
-    .catch(() => callback({ code: '500' } as any))
+    .catch(() => callback({ code: '500' }))
 }
 
-/** @deprecated Use `addScreenshotListener()`. */
-export function startListener(callback: (event: ScreenshotEvent) => void): Subscription {
+/**
+ * @deprecated Use `addScreenshotListener()`.
+ *
+ * The 1.x `keyWords` argument is accepted and ignored: detection no longer matches on file names.
+ */
+export function startListener(
+  callback: (event: ScreenshotEvent) => void,
+  _keyWords?: string,
+): Subscription {
   return addScreenshotListener(callback)
 }
 

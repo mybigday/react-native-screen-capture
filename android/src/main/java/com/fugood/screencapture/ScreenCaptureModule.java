@@ -102,7 +102,13 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         };
 
         if (MODE_ACCESSIBILITY.equals(mode)) {
-            ScreenCaptureAccessibilityService.capture(onBitmap);
+            // The view path settles through WindowCapture's guarded runnable; this one has to
+            // guard itself or a throw here leaves the Promise pending forever.
+            try {
+                ScreenCaptureAccessibilityService.capture(onBitmap);
+            } catch (Throwable t) {
+                onBitmap.onResult(null, String.valueOf(t.getMessage()));
+            }
             return;
         }
 
@@ -240,6 +246,12 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             promise.resolve("granted");
             return;
         }
+        if (ScreenCaptureAccessibilityService.isEnabled(reactContext)) {
+            // Already switched on, just not bound yet. Sending them back to Settings for a
+            // toggle that is already flipped is worse than telling them to wait.
+            promise.resolve("denied");
+            return;
+        }
         // The service can only be switched on by the user, so all we can do is take them there.
         openSettings();
         promise.resolve("denied");
@@ -322,7 +334,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
 
     private void startDetectionOnUiThread(final Promise promise) {
         try {
-            detector.start(getCurrentActivity(), new ScreenshotDetector.Listener() {
+            detector.start(new ScreenshotDetector.Listener() {
                 @Override
                 public void onScreenshot(@Nullable String path) {
                     WritableMap event = Arguments.createMap();
@@ -362,7 +374,11 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         UiThreadUtil.runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                promise.resolve(WindowCapture.dump(getCurrentActivity()));
+                try {
+                    promise.resolve(WindowCapture.dump(getCurrentActivity()));
+                } catch (Throwable t) {
+                    promise.reject(E_CAPTURE, String.valueOf(t.getMessage()), t);
+                }
             }
         });
     }

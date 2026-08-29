@@ -52,6 +52,9 @@ final class WindowCapture {
     /** Deadline for the API 29+ frame-commit callback, which is not guaranteed to fire. */
     private static final long FRAME_COMMIT_TIMEOUT_MS = 250L;
 
+    /** Deadline for the per-surface copies, which can also be dropped without a callback. */
+    private static final long SURFACE_COPY_TIMEOUT_MS = 1500L;
+
     private WindowCapture() {
     }
 
@@ -112,15 +115,28 @@ final class WindowCapture {
             return;
         }
 
+        // Everything from here runs from Handler callbacks, i.e. outside capture()'s try. An
+        // uncaught throw there would crash the main thread and leave the overlays installed.
         copySurfaceViews(surfaceViews, overlays, new Runnable() {
             @Override
             public void run() {
-                afterNextFrame(decor, new Runnable() {
-                    @Override
-                    public void run() {
-                        captureWindow(activity, window, decor, excludeStatusBar, overlays, callback);
-                    }
-                });
+                try {
+                    afterNextFrame(decor, new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                captureWindow(activity, window, decor, excludeStatusBar,
+                                    overlays, callback);
+                            } catch (Throwable t) {
+                                removeOverlays(overlays);
+                                callback.onResult(null, String.valueOf(t.getMessage()));
+                            }
+                        }
+                    });
+                } catch (Throwable t) {
+                    removeOverlays(overlays);
+                    callback.onResult(null, String.valueOf(t.getMessage()));
+                }
             }
         });
     }
@@ -133,38 +149,68 @@ final class WindowCapture {
     private static void copySurfaceViews(final List<SurfaceView> views, final List<Overlay> overlays,
                                          final Runnable done) {
         final AtomicInteger pending = new AtomicInteger(views.size());
+        final AtomicBoolean finished = new AtomicBoolean(false);
+        final Runnable finish = new Runnable() {
+            @Override
+            public void run() {
+                if (!finished.compareAndSet(false, true)) return;
+                // Drop the deadline below so it stops holding the capture closure -- and the
+                // activity behind it -- alive on the normal path.
+                UI.removeCallbacks(this);
+                done.run();
+            }
+        };
+        final Runnable countDown = new Runnable() {
+            @Override
+            public void run() {
+                if (pending.decrementAndGet() == 0) finish.run();
+            }
+        };
+
         for (final SurfaceView view : views) {
             final int width = view.getWidth();
             final int height = view.getHeight();
             if (width <= 0 || height <= 0) {
-                if (pending.decrementAndGet() == 0) done.run();
+                countDown.run();
                 continue;
             }
-            final Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            Bitmap allocated = null;
             try {
+                // Inside the try: allocating a full-size ARGB_8888 buffer for a large surface is
+                // itself a place this can fail.
+                allocated = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                final Bitmap bitmap = allocated;
                 PixelCopy.request(view, bitmap, new PixelCopy.OnPixelCopyFinishedListener() {
                     @Override
                     public void onPixelCopyFinished(int copyResult) {
-                        if (copyResult == PixelCopy.SUCCESS) {
+                        // A copy that lands after the deadline below must not install an overlay
+                        // nobody is going to remove.
+                        if (copyResult != PixelCopy.SUCCESS || finished.get()) {
+                            // Secure or DRM-protected surfaces land here too; the hole stays
+                            // transparent.
+                            bitmap.recycle();
+                        } else {
                             BitmapDrawable drawable = new BitmapDrawable(view.getResources(), bitmap);
                             drawable.setBounds(0, 0, width, height);
                             view.getOverlay().add(drawable);
                             overlays.add(new Overlay(view, drawable, bitmap));
-                        } else {
-                            // Secure or DRM-protected surfaces land here; the hole stays transparent.
-                            bitmap.recycle();
                         }
-                        if (pending.decrementAndGet() == 0) done.run();
+                        countDown.run();
                     }
                 }, UI);
             } catch (Throwable t) {
                 // Surface not created yet, or the allocation failed. Either way this view has to
-                // count down: otherwise `done` never runs, the window is never read back, and the
-                // overlays installed so far are never removed.
-                bitmap.recycle();
-                if (pending.decrementAndGet() == 0) done.run();
+                // count down: otherwise the window is never read back and the overlays installed
+                // so far are never removed.
+                if (allocated != null) allocated.recycle();
+                countDown.run();
             }
         }
+
+        // The framework can accept a request and then drop it -- a surface destroyed mid-capture,
+        // for instance -- without ever calling the listener. Without a deadline that would hang
+        // the capture forever with frozen overlays left on screen.
+        UI.postDelayed(finish, SURFACE_COPY_TIMEOUT_MS);
     }
 
     /** Runs {@code action} once the overlays we just added have actually reached the surface. */

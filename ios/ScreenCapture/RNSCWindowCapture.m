@@ -127,7 +127,12 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
         [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size format:format];
     UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
         for (UIWindow *window in windows) {
-            [window drawViewHierarchyInRect:window.frame afterScreenUpdates:YES];
+            // The context is anchored at the primary window's origin, not the screen's, so
+            // draw each window where it lands *within that window* -- window.frame is in
+            // screen coordinates and is only the same thing when the primary window happens
+            // to start at (0,0), which it does not under iPad Split View.
+            [window drawViewHierarchyInRect:[primary convertRect:window.bounds fromWindow:window]
+                         afterScreenUpdates:YES];
         }
     }];
 
