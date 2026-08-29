@@ -1,4 +1,4 @@
-import { NativeEventEmitter, NativeModules, Platform } from 'react-native'
+import { AppState, NativeEventEmitter, NativeModules, Platform } from 'react-native'
 import NativeScreenCapture from './NativeScreenCapture'
 
 export type CaptureMode = 'auto' | 'view' | 'accessibility'
@@ -58,11 +58,23 @@ const emitter = new NativeEventEmitter(
 
 let defaultMode: CaptureMode = 'auto'
 
+// The accessibility service can only be switched on from system Settings, which means the app
+// was backgrounded in between. Caching the answer keeps a burst of captures from paying a
+// native round-trip each, which would otherwise sit in front of every single frame.
+let accessibilityStatus: PermissionStatus | null = null
+AppState.addEventListener('change', (state) => {
+  if (state === 'active') accessibilityStatus = null
+})
+
 async function resolveMode(mode: CaptureMode): Promise<'view' | 'accessibility'> {
   if (mode !== 'auto') return mode
   if (Platform.OS !== 'android') return 'view'
-  const status = await NativeScreenCapture.getPermissionStatus('accessibility')
-  return status === 'granted' ? 'accessibility' : 'view'
+  if (accessibilityStatus === null) {
+    accessibilityStatus = (await NativeScreenCapture.getPermissionStatus(
+      'accessibility',
+    )) as PermissionStatus
+  }
+  return accessibilityStatus === 'granted' ? 'accessibility' : 'view'
 }
 
 /** Set the mode used when `capture()` is called without an explicit one. */
@@ -92,6 +104,7 @@ export function getPermissionStatus(mode: CaptureMode = 'view'): Promise<Permiss
 }
 
 export function requestPermission(mode: CaptureMode = 'view'): Promise<PermissionStatus> {
+  accessibilityStatus = null
   return NativeScreenCapture.requestPermission(mode) as Promise<PermissionStatus>
 }
 
@@ -120,20 +133,24 @@ export function coolDown(): Promise<void> {
 /**
  * Removes every file this module has written. Resolves with the count.
  *
- * `callback` exists for 1.x callers; it receives the same count and, as in 1.x, is also how a
- * failure is reported (with 0). New code should use the promise.
+ * `callback` exists for 1.x callers, which passed one instead of using the promise. It gets
+ * 1.x's `{ code }` object -- `'200'` or `'500'` -- plus the count. New code should await the
+ * promise, which is the only place the count is meaningful on its own.
  */
-export function clearCache(callback?: (count: number) => void): Promise<number> {
+export function clearCache(
+  callback?: (result: { code: string; count: number }) => void,
+): Promise<number> {
   const promise = NativeScreenCapture.clearCache()
   if (!callback) return promise
-  // 1.x had no promise to catch, so the returned one must not reject either.
+  // 1.x reported failure through the same callback and had no promise to catch, so the one
+  // returned here must not reject either.
   return promise.then(
     (count) => {
-      callback(count)
+      callback({ code: '200', count })
       return count
     },
     () => {
-      callback(0)
+      callback({ code: '500', count: 0 })
       return 0
     },
   )
@@ -184,7 +201,12 @@ export function screenCapture(
 }
 
 /**
- * @deprecated Use `addScreenshotListener()`.
+ * @deprecated Use `addScreenshotListener()`. **The event payload is not 1.x-compatible.**
+ *
+ * 1.x delivered `{ code, uri, base64 }`. This delivers `{ uri }` on Android and `{}` on iOS:
+ * the platform screenshot callbacks hand over no image, and decoding the user's screenshot
+ * just to fill `base64` in would cost a full read and encode on every screenshot. Handlers
+ * that used `base64` need to call `capture()` themselves.
  *
  * The 1.x `keyWords` argument is accepted and ignored: detection no longer matches on file names.
  */

@@ -91,25 +91,36 @@ final class ScreenshotDetector implements LifecycleEventListener {
 
     private void bind() {
         Activity activity = context.getCurrentActivity();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && activity != null) {
-            bindModern(activity);
-        } else {
-            bindLegacy();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && activity != null
+            && bindModern(activity)) {
+            return;
         }
+        bindLegacy();
     }
 
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-    private void bindModern(final Activity activity) {
-        callback = new Activity.ScreenCaptureCallback() {
+    private boolean bindModern(final Activity activity) {
+        Activity.ScreenCaptureCallback pending = new Activity.ScreenCaptureCallback() {
             @Override
             public void onScreenCaptured() {
                 Listener current = listener;
                 if (current != null) current.onScreenshot(null);
             }
         };
-        // Throws SecurityException when the app has not declared DETECT_SCREEN_CAPTURE.
-        activity.registerScreenCaptureCallback(activity.getMainExecutor(), callback);
+        try {
+            activity.registerScreenCaptureCallback(activity.getMainExecutor(), pending);
+        } catch (Throwable t) {
+            // Typically a SecurityException because the app has not declared
+            // DETECT_SCREEN_CAPTURE. Leave the fields clear so the caller falls back to the
+            // legacy watcher rather than sitting in a state that is neither bound nor
+            // recoverable on the next resume.
+            return false;
+        }
+        // Only now: a half-assigned callback with no registeredActivity matches neither branch
+        // of onHostResume, which would strand the detector permanently.
+        callback = pending;
         registeredActivity = new WeakReference<>(activity);
+        return true;
     }
 
     private void bindLegacy() {

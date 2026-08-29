@@ -2,6 +2,7 @@ package com.fugood.screencapture;
 
 import android.accessibilityservice.AccessibilityService;
 import android.content.ComponentName;
+import android.content.pm.PackageManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
@@ -98,6 +99,25 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
             new ComponentName(context, ScreenCaptureAccessibilityService.class);
         return enabled.contains(component.flattenToString())
             || enabled.contains(component.flattenToShortString());
+    }
+
+    /**
+     * Whether the host app actually declared this service.
+     *
+     * <p>The library's manifest deliberately does not: an accessibility service is a heavy,
+     * user-visible permission that an app must opt into. Without this check the mode looks
+     * available on any new enough OS, and {@code requestPermission} would send the user to a
+     * Settings page that lists nothing to enable.
+     */
+    static boolean isDeclared(Context context) {
+        ComponentName component =
+            new ComponentName(context, ScreenCaptureAccessibilityService.class);
+        try {
+            context.getPackageManager().getServiceInfo(component, 0);
+            return true;
+        } catch (PackageManager.NameNotFoundException e) {
+            return false;
+        }
     }
 
     static void capture(CaptureCallback callback) {

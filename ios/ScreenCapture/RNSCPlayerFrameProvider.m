@@ -149,6 +149,17 @@
 
     // Playlists swap the item out from under us; move the output across when they do.
     [self detachOutputFromObservedItem];
+
+    // Drop the frame we are holding: it belongs to the item we just left. A freshly added
+    // output reports no new pixel buffer for the first few frames, so -pump would take its
+    // early-out, -hasFrame would say YES, and the capture would composite the last frame of
+    // the *previous* video over the one now playing.
+    os_unfair_lock_lock(&_lock);
+    CVPixelBufferRef stale = _latest;
+    _latest = NULL;
+    os_unfair_lock_unlock(&_lock);
+    if (stale) CVPixelBufferRelease(stale);
+
     if (item && ![item.outputs containsObject:_output]) {
         [item addOutput:_output];
         _observedItem = item;

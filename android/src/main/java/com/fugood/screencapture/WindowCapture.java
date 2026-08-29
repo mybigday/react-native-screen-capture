@@ -79,7 +79,8 @@ final class WindowCapture {
         });
     }
 
-    private static CaptureCallback once(final CaptureCallback delegate) {
+    /** Wraps a callback so only the first settle gets through; later bitmaps are recycled. */
+    static CaptureCallback once(final CaptureCallback delegate) {
         final AtomicBoolean settled = new AtomicBoolean(false);
         return new CaptureCallback() {
             @Override
@@ -167,6 +168,16 @@ final class WindowCapture {
             }
         };
 
+        // Posted before the loop, not after: a loop that finishes synchronously -- every view
+        // skipped or failing to allocate -- would otherwise run `finish` inline, remove nothing,
+        // and then have this deadline posted behind it, pinning the whole capture closure for
+        // another 1.5s after the Promise had already settled.
+        //
+        // The framework can also accept a request and then drop it -- a surface destroyed
+        // mid-capture, for instance -- without ever calling the listener. Without a deadline
+        // that would hang the capture forever with frozen overlays left on screen.
+        UI.postDelayed(finish, SURFACE_COPY_TIMEOUT_MS);
+
         for (final SurfaceView view : views) {
             final int width = view.getWidth();
             final int height = view.getHeight();
@@ -206,40 +217,55 @@ final class WindowCapture {
                 countDown.run();
             }
         }
-
-        // The framework can accept a request and then drop it -- a surface destroyed mid-capture,
-        // for instance -- without ever calling the listener. Without a deadline that would hang
-        // the capture forever with frozen overlays left on screen.
-        UI.postDelayed(finish, SURFACE_COPY_TIMEOUT_MS);
     }
 
     /** Runs {@code action} once the overlays we just added have actually reached the surface. */
     private static void afterNextFrame(final View decor, final Runnable action) {
         decor.invalidate();
+        // A window that has stopped drawing never commits, and a detached decor never runs what
+        // View.post() queued -- ViewRootImpl holds it until re-attach. Either way, without a
+        // deadline the capture would hang forever with the overlays still installed.
+        final AtomicBoolean done = new AtomicBoolean(false);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // A window that has stopped drawing never commits, and without a deadline the
-            // capture would hang forever with the overlays still installed.
-            final AtomicBoolean done = new AtomicBoolean(false);
+            // Holds the registered callback so the deadline can take it back off the observer:
+            // frame-commit callbacks are only dropped when they fire, and this one retains the
+            // whole capture closure -- activity, decor, overlays, Promise -- until it does.
+            final Runnable[] committed = new Runnable[1];
             final Runnable guarded = new Runnable() {
                 @Override
                 public void run() {
-                    if (done.compareAndSet(false, true)) action.run();
+                    if (!done.compareAndSet(false, true)) return;
+                    UI.removeCallbacks(this);
+                    if (committed[0] != null) {
+                        decor.getViewTreeObserver().unregisterFrameCommitCallback(committed[0]);
+                    }
+                    action.run();
                 }
             };
-            decor.getViewTreeObserver().registerFrameCommitCallback(new Runnable() {
+            committed[0] = new Runnable() {
                 @Override
                 public void run() {
                     UI.post(guarded);
                 }
-            });
+            };
+            decor.getViewTreeObserver().registerFrameCommitCallback(committed[0]);
             UI.postDelayed(guarded, FRAME_COMMIT_TIMEOUT_MS);
         } else {
+            final Runnable guarded = new Runnable() {
+                @Override
+                public void run() {
+                    if (!done.compareAndSet(false, true)) return;
+                    UI.removeCallbacks(this);
+                    action.run();
+                }
+            };
             decor.post(new Runnable() {
                 @Override
                 public void run() {
-                    UI.postDelayed(action, FRAME_FALLBACK_DELAY_MS);
+                    UI.postDelayed(guarded, FRAME_FALLBACK_DELAY_MS);
                 }
             });
+            UI.postDelayed(guarded, FRAME_COMMIT_TIMEOUT_MS + FRAME_FALLBACK_DELAY_MS);
         }
     }
 

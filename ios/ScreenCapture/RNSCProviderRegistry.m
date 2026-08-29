@@ -170,6 +170,11 @@ static const NSTimeInterval kIdleDetachDelay = 3.0;
 
     id<RNSCFrameProvider> provider = builder();
     if (!provider) return;
+    // Detach the dead one we are about to displace. Once the key points elsewhere the prune
+    // loop can no longer see it, and -dealloc is too late for the camera provider: it restores
+    // the host's delegate only when the output still points at it, and AVFoundation holds the
+    // delegate weakly, so by dealloc that check can never match.
+    if (cached) [cached detach];
     _providers[identifier] = provider;
     [found addObject:provider];
 }

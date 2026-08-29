@@ -90,7 +90,9 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         // also let it go stale across the service's retry or a rotation.
         final boolean cropStatusBar = MODE_ACCESSIBILITY.equals(mode) && excludeStatusBar;
 
-        final CaptureCallback onBitmap = new CaptureCallback() {
+        // Settle-once: the accessibility service reports its synchronous failures through this
+        // same callback, so a throw out of the reject below must not become a second settle.
+        final CaptureCallback onBitmap = WindowCapture.once(new CaptureCallback() {
             @Override
             public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
                 if (bitmap == null) {
@@ -99,11 +101,12 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                 }
                 encode(bitmap, extension, quality, scale, includeBase64, cropStatusBar, promise);
             }
-        };
+        });
 
         if (MODE_ACCESSIBILITY.equals(mode)) {
             // The view path settles through WindowCapture's guarded runnable; this one has to
-            // guard itself or a throw here leaves the Promise pending forever.
+            // guard itself or a throw here leaves the Promise pending forever. onBitmap is
+            // settle-once, so this cannot reject a Promise that has already been settled.
             try {
                 ScreenCaptureAccessibilityService.capture(onBitmap);
             } catch (Throwable t) {
@@ -127,6 +130,8 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             @Override
             public void run() {
                 Bitmap bitmap = source;
+                WritableMap result = null;
+                Throwable failure = null;
                 try {
                     int top = cropStatusBar
                         ? WindowCapture.nominalStatusBarHeight(reactContext) : 0;
@@ -179,18 +184,24 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                         out.close();
                     }
 
-                    WritableMap result = Arguments.createMap();
+                    result = Arguments.createMap();
                     result.putString("uri", "file://" + file.getAbsolutePath());
                     result.putInt("width", bitmap.getWidth());
                     result.putInt("height", bitmap.getHeight());
                     if (encoded != null) {
                         result.putString("base64", Base64.encodeToString(encoded, Base64.NO_WRAP));
                     }
-                    promise.resolve(result);
                 } catch (Throwable t) {
-                    promise.reject(E_CAPTURE, String.valueOf(t.getMessage()), t);
+                    failure = t;
                 } finally {
                     if (!bitmap.isRecycled()) bitmap.recycle();
+                }
+                // Outside the try: a throw out of resolve() must not come back round as a
+                // reject on the Promise it just settled.
+                if (failure != null) {
+                    promise.reject(E_CAPTURE, String.valueOf(failure.getMessage()), failure);
+                } else {
+                    promise.resolve(result);
                 }
             }
         };
@@ -246,6 +257,11 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             promise.resolve("granted");
             return;
         }
+        if (!ScreenCaptureAccessibilityService.isDeclared(reactContext)) {
+            // Settings would open on a list that does not contain this app's service.
+            promise.resolve("unavailable");
+            return;
+        }
         if (ScreenCaptureAccessibilityService.isEnabled(reactContext)) {
             // Already switched on, just not bound yet. Sending them back to Settings for a
             // toggle that is already flipped is worse than telling them to wait.
@@ -283,7 +299,8 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
     @ReactMethod
     public void isModeAvailable(String mode, Promise promise) {
         if (MODE_ACCESSIBILITY.equals(mode)) {
-            promise.resolve(ScreenCaptureAccessibilityService.isSupported());
+            promise.resolve(ScreenCaptureAccessibilityService.isSupported()
+                && ScreenCaptureAccessibilityService.isDeclared(reactContext));
         } else {
             promise.resolve(true);
         }
@@ -341,9 +358,16 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                     if (path != null) {
                         event.putString("uri", path.startsWith("file://") ? path : "file://" + path);
                     }
-                    reactContext
-                        .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                        .emit(EVENT_SCREENSHOT, event);
+                    // Runs on the main thread from a system callback, so it owns its failures:
+                    // detection can outlive the React instance by a moment (invalidate() only
+                    // posts the stop), and emitting into a torn-down instance throws.
+                    try {
+                        if (!reactContext.hasActiveReactInstance()) return;
+                        reactContext
+                            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                            .emit(EVENT_SCREENSHOT, event);
+                    } catch (Throwable ignored) {
+                    }
                 }
             });
             promise.resolve(null);

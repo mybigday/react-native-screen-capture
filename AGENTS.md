@@ -133,9 +133,9 @@ it.
 Pull the PNGs off the device rather than reading a preview:
 
 ```sh
-# iOS -- the flag is --user, not --username, and it must be `mobile`.
+# iOS. `info files` takes no user flag; `copy from` needs --user mobile (not --username).
 xcrun devicectl device info files --device <udid> --domain-type appDataContainer \
-  --domain-identifier <bundle-id> --user mobile | grep react-native-screen-capture
+  --domain-identifier <bundle-id> | grep react-native-screen-capture
 xcrun devicectl device copy from --device <udid> --domain-type appDataContainer \
   --domain-identifier <bundle-id> --user mobile \
   --source Library/Caches/react-native-screen-capture/<file>.png --destination ./out.png

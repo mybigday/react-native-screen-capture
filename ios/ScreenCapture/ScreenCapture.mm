@@ -120,8 +120,14 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
 
         NSMutableDictionary *result = [NSMutableDictionary dictionary];
         result[@"uri"] = [@"file://" stringByAppendingString:path];
-        result[@"width"] = @(output.size.width * output.scale);
-        result[@"height"] = @(output.size.height * output.scale);
+        // From the CGImage, not size * scale: the renderer rounds fractional point sizes, so a
+        // scaled capture would otherwise report a non-integer width that disagrees with the
+        // file just written -- and with Android, which returns an exact pixel count.
+        CGImageRef cgImage = output.CGImage;
+        result[@"width"] = @(cgImage ? (NSInteger)CGImageGetWidth(cgImage)
+                                     : (NSInteger)lround(output.size.width * output.scale));
+        result[@"height"] = @(cgImage ? (NSInteger)CGImageGetHeight(cgImage)
+                                      : (NSInteger)lround(output.size.height * output.scale));
         if (includeBase64) {
             result[@"base64"] = [data base64EncodedStringWithOptions:0];
         }
