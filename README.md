@@ -165,9 +165,12 @@ mean non-SDK reflection, which we do not do. Use `accessibility` mode if you nee
 The iOS status bar is drawn by a separate system process and is not in the app's windows, so it
 is never captured. `excludeStatusBar: true` crops that area off.
 
-On Android `excludeStatusBar` applies in both modes: `view` crops during the readback, and
-`accessibility` — which really does capture the system bars — crops them off the captured
-display. The navigation bar is not cropped in either mode.
+On Android `excludeStatusBar` applies in both modes, but they measure differently. `view` mode
+crops by the inset actually in effect on the app's own window, so immersive and cutout cases are
+exact. `accessibility` mode captures the whole display — often while a *different* app is in
+front — so it has no window whose inset would mean anything and crops by the platform's nominal
+status bar height instead. If the foreground app hides the status bar there is nothing there to
+remove and the option will take a strip of real content. The navigation bar is never cropped.
 
 ## Supported media components
 

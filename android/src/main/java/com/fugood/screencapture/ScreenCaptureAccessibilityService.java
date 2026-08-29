@@ -33,10 +33,6 @@ import androidx.annotation.RequiresApi;
  */
 public class ScreenCaptureAccessibilityService extends AccessibilityService {
 
-    interface Callback {
-        void onResult(@Nullable Bitmap bitmap, @Nullable String error);
-    }
-
     private static final int RETRY_DELAY_MS = 400;
 
     /**
@@ -104,11 +100,11 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
             || enabled.contains(component.flattenToShortString());
     }
 
-    static void capture(Callback callback) {
+    static void capture(CaptureCallback callback) {
         capture(callback, 1);
     }
 
-    private static void capture(final Callback callback, final int retriesLeft) {
+    private static void capture(final CaptureCallback callback, final int retriesLeft) {
         if (!isSupported()) {
             callback.onResult(null, "Accessibility capture needs Android 11 (API 30) or newer");
             return;
@@ -124,7 +120,7 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
 
     @RequiresApi(Build.VERSION_CODES.R)
     private static void takeScreenshot(final ScreenCaptureAccessibilityService service,
-                                       final Callback callback, final int retriesLeft) {
+                                       final CaptureCallback callback, final int retriesLeft) {
         service.takeScreenshot(
             Display.DEFAULT_DISPLAY,
             CAPTURE_EXECUTOR,

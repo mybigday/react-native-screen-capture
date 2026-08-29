@@ -22,6 +22,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 public class ScreenCaptureModule extends ScreenCaptureSpec {
 
@@ -70,33 +71,26 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         final boolean includeBase64 =
             options.hasKey("includeBase64") && options.getBoolean("includeBase64");
 
-        // `view` mode crops during the window readback; a whole-display capture cannot, so its
-        // crop is deferred to encode() -- which also keeps the allocation inside a try/catch.
-        final int cropTop = (MODE_ACCESSIBILITY.equals(mode) && excludeStatusBar)
-            ? WindowCapture.displayStatusBarHeight(getCurrentActivity(), reactContext)
-            : 0;
+        // `view` mode crops as part of the readback on API 26+, and right after it on 24-25.
+        // A whole-display capture cannot crop at source, so accessibility mode defers to
+        // encode(), which is on a worker thread inside a try/catch. The height is resolved there
+        // too, not here: this method runs on the module thread, and resolving it eagerly would
+        // also let it go stale across the service's retry or a rotation.
+        final boolean cropStatusBar = MODE_ACCESSIBILITY.equals(mode) && excludeStatusBar;
 
-        final WindowCapture.Callback onBitmap = new WindowCapture.Callback() {
+        final CaptureCallback onBitmap = new CaptureCallback() {
             @Override
             public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
                 if (bitmap == null) {
                     promise.reject(E_CAPTURE, error != null ? error : "Capture failed");
                     return;
                 }
-                encode(bitmap, extension, quality, scale, includeBase64, cropTop, promise);
+                encode(bitmap, extension, quality, scale, includeBase64, cropStatusBar, promise);
             }
         };
 
         if (MODE_ACCESSIBILITY.equals(mode)) {
-            ScreenCaptureAccessibilityService.capture(new ScreenCaptureAccessibilityService.Callback() {
-                @Override
-                public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
-                    // Nothing heavy here on purpose: the service calls this outside its own
-                    // try/catch, so anything that can throw would escape and leave the Promise
-                    // unsettled forever.
-                    onBitmap.onResult(bitmap, error);
-                }
-            });
+            ScreenCaptureAccessibilityService.capture(onBitmap);
             return;
         }
 
@@ -109,26 +103,34 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
     }
 
     private void encode(final Bitmap source, final String extension, final int quality,
-                        final double scale, final boolean includeBase64, final int cropTop,
-                        final Promise promise) {
-        encoder.execute(new Runnable() {
+                        final double scale, final boolean includeBase64,
+                        final boolean cropStatusBar, final Promise promise) {
+        final Runnable work = new Runnable() {
             @Override
             public void run() {
                 Bitmap bitmap = source;
                 try {
-                    final int top = (cropTop > 0 && cropTop < source.getHeight()) ? cropTop : 0;
+                    int top = cropStatusBar
+                        ? WindowCapture.nominalStatusBarHeight(reactContext) : 0;
+                    if (top < 0 || top >= source.getHeight()) top = 0;
                     final boolean resize = scale > 0 && scale != 1d;
                     if (top > 0 || resize) {
-                        // One allocation for both. Cropping and then rescaling would hold two
-                        // full-display bitmaps at once on top of the one the caller handed us.
+                        final int srcWidth = source.getWidth();
+                        final int srcHeight = source.getHeight() - top;
                         Matrix matrix = null;
                         if (resize) {
+                            // Derive the matrix from clamped target dimensions: scaling by the
+                            // raw factor can round a dimension to 0, which createBitmap rejects.
+                            int dstWidth = Math.max(1, (int) Math.round(srcWidth * scale));
+                            int dstHeight = Math.max(1, (int) Math.round(srcHeight * scale));
                             matrix = new Matrix();
-                            matrix.postScale((float) scale, (float) scale);
+                            matrix.postScale((float) dstWidth / srcWidth,
+                                             (float) dstHeight / srcHeight);
                         }
+                        // One allocation for both. Cropping and then rescaling would hold two
+                        // full-display bitmaps at once on top of the one the caller handed us.
                         bitmap = Bitmap.createBitmap(
-                            source, 0, top, source.getWidth(), source.getHeight() - top,
-                            matrix, true);
+                            source, 0, top, srcWidth, srcHeight, matrix, true);
                         if (bitmap != source) source.recycle();
                     }
 
@@ -160,7 +162,15 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                     if (!bitmap.isRecycled()) bitmap.recycle();
                 }
             }
-        });
+        };
+        try {
+            encoder.execute(work);
+        } catch (RejectedExecutionException e) {
+            // invalidate() shuts the encoder down. Without this the rejection would escape into
+            // the accessibility service's unguarded callback and the Promise would never settle.
+            source.recycle();
+            promise.reject(E_CAPTURE, "Module is shutting down", e);
+        }
     }
 
     private static Bitmap.CompressFormat compressFormat(String extension) {

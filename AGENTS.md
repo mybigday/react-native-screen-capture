@@ -71,6 +71,13 @@ resolution for every package. The Metro warning it silences is harmless.
 
 ### Android
 
+- Anything reading `Window`/`View`/insets belongs on the UI thread. `@ReactMethod`s do not run
+  there — `WindowCapture.capture()` opens with `UI.post()` for exactly this reason. Measuring
+  insets from a module method reads `ViewRootImpl` state off-thread and can tear or throw.
+- `accessibility` mode captures the *display*, so this app's window insets are the wrong measure
+  for it: they are 0 when the app is immersive or in the bottom split-screen pane, and the app is
+  usually not even foreground. Use the platform's nominal `status_bar_height` there, and the real
+  inset only for `view` mode, which really is cropping its own window.
 - `PixelCopy.request(SurfaceView, Bitmap, listener, Handler)` is available from **API 24**, not
   26. Only the `Rect` and `Window` overloads are 26 — check `api-versions.xml` in the SDK before
   believing an availability claim:

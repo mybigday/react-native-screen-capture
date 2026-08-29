@@ -43,10 +43,6 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class WindowCapture {
 
-    interface Callback {
-        void onResult(@Nullable Bitmap bitmap, @Nullable String error);
-    }
-
     private static final Handler UI = new Handler(Looper.getMainLooper());
 
     /** How long to wait for the post-overlay frame on API < 29, where there is no commit callback. */
@@ -55,7 +51,7 @@ final class WindowCapture {
     private WindowCapture() {
     }
 
-    static void capture(final Activity activity, final boolean excludeStatusBar, final Callback callback) {
+    static void capture(final Activity activity, final boolean excludeStatusBar, final CaptureCallback callback) {
         if (activity == null) {
             callback.onResult(null, "No current activity");
             return;
@@ -73,7 +69,7 @@ final class WindowCapture {
     }
 
     private static void captureOnUiThread(final Activity activity, final boolean excludeStatusBar,
-                                          final Callback callback) {
+                                          final CaptureCallback callback) {
         final Window window = activity.getWindow();
         if (window == null) {
             callback.onResult(null, "Activity has no window");
@@ -169,7 +165,7 @@ final class WindowCapture {
 
     private static void captureWindow(final Activity activity, final Window window, final View decor,
                                       final boolean excludeStatusBar, final List<Overlay> overlays,
-                                      final Callback callback) {
+                                      final CaptureCallback callback) {
         final int width = decor.getWidth();
         final int height = decor.getHeight();
         int offset = excludeStatusBar ? windowStatusBarHeight(activity, decor) : 0;
@@ -203,17 +199,22 @@ final class WindowCapture {
 
         // API 24-25: PixelCopy has no Window overload. Draw the hierarchy instead. The surface
         // content is still included because it is sitting in a ViewOverlay at this point.
+        Bitmap out = null;
+        String failure = null;
         Bitmap full = null;
         try {
             full = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             decor.draw(new Canvas(full));
-            callback.onResult(cropTop(full, top), null);
+            out = cropTop(full, top);
+            full = null; // cropTop owns it now, and may already have recycled it
         } catch (Throwable t) {
             if (full != null) full.recycle();
-            callback.onResult(null, String.valueOf(t.getMessage()));
+            failure = String.valueOf(t.getMessage());
         } finally {
             removeOverlays(overlays);
         }
+        // Outside the try: settling twice would be worse than letting a callback throw.
+        callback.onResult(out, failure);
     }
 
     private static void removeOverlays(final List<Overlay> overlays) {
@@ -251,38 +252,37 @@ final class WindowCapture {
     }
 
     /**
-     * Status bar height to crop off a whole-display capture, for {@code accessibility} mode --
-     * which has no window of its own to measure.
+     * Status bar height of the display, for cropping a whole-display capture.
      *
-     * <p>Prefers the inset actually in effect, so an app running immersive or behind a cutout
-     * gets the real height rather than the platform's nominal one. Note the limit: the inset
-     * describes <em>this</em> app's window, while the capture is of the whole display, so a
-     * different foreground app in a different mode can still disagree.
+     * <p>Deliberately the platform's {@code status_bar_height} rather than this app's window
+     * inset: {@code accessibility} mode captures the display, usually while a *different* app is
+     * foreground, so our own window's inset describes the wrong thing (and is 0 outright when we
+     * are immersive or in the bottom half of a split screen). This is the height the system gives
+     * the bar; if the foreground app hides it there is nothing to crop and the option will take
+     * real content instead -- documented in the README.
+     *
+     * <p>Not named {@code statusBarHeight}: an {@code Activity} is a {@code Context}, so an
+     * overload would silently resolve here at any call site that meant the insets-aware
+     * {@link #windowStatusBarHeight(Activity, View)}.
      */
-    static int displayStatusBarHeight(@Nullable final Activity activity, final Context context) {
-        if (activity != null && activity.getWindow() != null) {
-            View decor = activity.getWindow().getDecorView();
-            if (decor.getRootWindowInsets() != null) return windowStatusBarHeight(activity, decor);
-        }
-        return nominalStatusBarHeight(context);
-    }
-
-    /**
-     * Deliberately not called {@code statusBarHeight}: an {@code Activity} is a {@code Context},
-     * so an overload would silently resolve to this insets-blind version at any call site that
-     * meant the other one.
-     */
-    private static int nominalStatusBarHeight(final Context context) {
+    static int nominalStatusBarHeight(final Context context) {
         int id = context.getResources().getIdentifier("status_bar_height", "dimen", "android");
         return id > 0 ? context.getResources().getDimensionPixelSize(id) : 0;
     }
 
-    /** Drops {@code top} rows off a bitmap, recycling the original. Returns it unchanged at 0. */
+    /**
+     * Drops {@code top} rows off a bitmap, recycling the original. Returns it unchanged at 0.
+     *
+     * <p>{@code createBitmap} hands back the source itself for a full-extent subset of an
+     * immutable bitmap, so the identity check stays even though the guard above makes it
+     * unreachable from here -- a future caller with different bounds would otherwise get a
+     * recycled bitmap back.
+     */
     static Bitmap cropTop(final Bitmap source, final int top) {
         if (top <= 0 || top >= source.getHeight()) return source;
         Bitmap cropped =
             Bitmap.createBitmap(source, 0, top, source.getWidth(), source.getHeight() - top);
-        source.recycle();
+        if (cropped != source) source.recycle();
         return cropped;
     }
 
