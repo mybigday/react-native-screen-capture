@@ -53,8 +53,8 @@ const EVENT_SCREENSHOT = 'ScreenCapture'
 // Tracked here rather than asked of the emitter: `ScreenCapture` is a bare global device event,
 // so emitter.listenerCount() also sees 1.x-era DeviceEventEmitter listeners and any second copy
 // of this package -- which would keep native detection running after our last subscriber left.
-// A set rather than a counter, so stopListener() emptying it cannot be undone by a stale
-// subscription's remove() driving the count past zero and stopping a live listener.
+// A set rather than a counter, so a subscription removed twice cannot drive the count past
+// zero and stop detection under a listener that is still subscribed.
 const active = new Set<object>()
 
 const emitter = new NativeEventEmitter(
@@ -158,30 +158,9 @@ export function coolDown(): Promise<void> {
   return NativeScreenCapture.coolDown()
 }
 
-/**
- * Removes every file this module has written. Resolves with the count.
- *
- * `callback` exists for 1.x callers, which passed one instead of using the promise. It gets
- * 1.x's `{ code }` object -- `'200'` or `'500'` -- plus the count. New code should await the
- * promise, which is the only place the count is meaningful on its own.
- */
-export function clearCache(
-  callback?: (result: { code: string; count: number }) => void,
-): Promise<number> {
-  const promise = NativeScreenCapture.clearCache()
-  if (!callback) return promise
-  // 1.x reported failure through the same callback and had no promise to catch, so the one
-  // returned here must not reject either.
-  return promise.then(
-    (count) => {
-      callback({ code: '200', count })
-      return count
-    },
-    () => {
-      callback({ code: '500', count: 0 })
-      return 0
-    },
-  )
+/** Removes every file this module has written. Resolves with the count. */
+export function clearCache(): Promise<number> {
+  return NativeScreenCapture.clearCache()
 }
 
 /** Fires when the *user* takes a screenshot. Does not fire for `capture()`. */
@@ -211,53 +190,6 @@ export function dumpHierarchy(): Promise<string> {
   return NativeScreenCapture.dumpHierarchy()
 }
 
-/** @deprecated Use `capture()`. */
-export function screenCapture(
-  callback: (result: Partial<CaptureResult> & { code: string }) => void,
-  excludeStatusBar?: boolean,
-  options?: CaptureOptions,
-): void {
-  capture({
-    ...options,
-    // 1.x only honoured this argument when it was actually passed, and defaulted to true on
-    // Android. Spreading `options` and then writing an undefined over it would have made the
-    // default false on both platforms.
-    excludeStatusBar: excludeStatusBar ?? options?.excludeStatusBar ?? Platform.OS === 'android',
-    // 1.x spelled "native size" as scale 0; capture() spells it 1.
-    scale: options?.scale || 1,
-    includeBase64: true,
-  })
-    .then((r) => callback({ ...r, code: '200' }))
-    .catch(() => callback({ code: '500' }))
-}
-
-/**
- * @deprecated Use `addScreenshotListener()`. **The event payload is not 1.x-compatible.**
- *
- * 1.x delivered `{ code, uri, base64 }`. This delivers `{ uri }` on Android and `{}` on iOS:
- * the platform screenshot callbacks hand over no image, and decoding the user's screenshot
- * just to fill `base64` in would cost a full read and encode on every screenshot. Handlers
- * that used `base64` need to call `capture()` themselves.
- *
- * The 1.x `keyWords` argument is accepted and ignored: detection no longer matches on file names.
- */
-export function startListener(
-  callback: (event: ScreenshotEvent) => void,
-  _keyWords?: string,
-): Subscription {
-  return addScreenshotListener(callback)
-}
-
-/** @deprecated Remove the subscription returned by `addScreenshotListener()` instead. */
-export function stopListener(): Promise<void> {
-  // Keeps 1.x's behaviour, including its bluntness: on a bare global event this also drops
-  // listeners registered by other code. That is why it is deprecated in favour of removing the
-  // subscription addScreenshotListener() hands back.
-  emitter.removeAllListeners(EVENT_SCREENSHOT)
-  active.clear()
-  return NativeScreenCapture.stopScreenshotDetection()
-}
-
 export default {
   capture,
   setMode,
@@ -271,7 +203,4 @@ export default {
   clearCache,
   addScreenshotListener,
   dumpHierarchy,
-  screenCapture,
-  startListener,
-  stopListener,
 }

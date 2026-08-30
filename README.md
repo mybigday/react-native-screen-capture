@@ -352,9 +352,9 @@ usual cause.
 
 ## Migrating from 1.x
 
-The 1.x API still works but is deprecated and will be removed in 3.0.
+The 1.x API was removed in 3.0. Every call has a direct replacement:
 
-| 1.x | 2.x |
+| 1.x | 3.x |
 | --- | --- |
 | `screenCapture(cb, isHiddenStatus, options)` | `await capture({ excludeStatusBar, ...options })` |
 | `startListener(cb, keywords)` | `addScreenshotListener(cb)` |
@@ -362,10 +362,14 @@ The 1.x API still works but is deprecated and will be removed in 3.0.
 | `clearCache(cb)` | `await clearCache()` |
 | result `{ code: '200', uri, base64 }` | resolves `{ uri, width, height }`, rejects on failure |
 
-The one thing the 1.x shims cannot preserve is the **screenshot event payload**. 1.x delivered
-`{ code, uri, base64 }`; the event now carries `{ uri }` on Android and `{}` on iOS, because the
-platform screenshot callbacks hand over no image. If your handler used `base64`, call
-`capture()` from it instead.
+Two of those are not pure renames:
+
+- `isHiddenStatus` defaulted to `true` on Android and `false` on iOS. `excludeStatusBar`
+  defaults to `false` everywhere, so pass it explicitly if you relied on the Android default.
+  1.x also spelled "native size" as `scale: 0`; that is `scale: 1` now.
+- The **screenshot event payload** is different. 1.x delivered `{ code, uri, base64 }`; the
+  event now carries `{ uri }` on Android and `{}` on iOS, because the platform screenshot
+  callbacks hand over no image. If your handler used `base64`, call `capture()` from it instead.
 
 Other changes:
 
