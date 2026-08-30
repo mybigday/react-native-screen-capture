@@ -5,19 +5,24 @@ package = JSON.parse(File.read(File.join(__dir__, "package.json")))
 Pod::Spec.new do |s|
   s.name         = "react-native-screen-capture"
   s.version      = package["version"]
-  s.summary      = "React Native Screen Capture"
-  s.author       = { "Bricks Dev" => "dev@bricks.tools" }
-
-  s.homepage     = "https://bricks.tools/"
-
+  s.summary      = package["description"]
+  s.description  = package["description"]
+  s.homepage     = "https://github.com/mybigday/react-native-screen-capture"
   s.license      = "MIT"
-  s.ios.deployment_target = "7.0"
-  s.tvos.deployment_target = "9.0"
+  s.author       = { "BRICKS INC." => "dev@bricks.tools" }
 
-  s.source       = { :git => "https://github.com/mybigday/react-native-screen-capture.git", :tag => "#{s.version}" }
+  s.platforms    = { :ios => "15.1", :tvos => "15.1" }
 
-  s.source_files  = "ios/**/*.{h,m}"
-  s.requires_arc = true
+  s.source       = {
+    :git => "https://github.com/mybigday/react-native-screen-capture.git",
+    :tag => "v#{s.version}"
+  }
 
-  s.dependency "React"
+  s.source_files  = "ios/ScreenCapture/**/*.{h,m,mm}"
+  s.requires_arc  = true
+
+  s.frameworks = "AVFoundation", "AVKit", "CoreImage", "CoreMedia", "CoreVideo", "Metal", "UIKit"
+
+  # Pulls in React-Core, and wires up the new architecture when the app has it enabled.
+  install_modules_dependencies(s)
 end
