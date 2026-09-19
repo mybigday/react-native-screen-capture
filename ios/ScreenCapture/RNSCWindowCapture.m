@@ -39,16 +39,20 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     NSArray<id<RNSCFrameProvider>> *providers = [registry attachedProvidersForWindows:windows];
 
     [self waitForFrames:providers attempt:0 then:^{
+        NSError *renderError = nil;
         UIImage *image = [self renderWindows:windows
                                    providers:providers
-                          excludingStatusBar:excludeStatusBar];
+                          excludingStatusBar:excludeStatusBar
+                                       error:&renderError];
         [registry scheduleIdleDetach];
         if (image) {
             completion(image, nil);
         } else {
-            completion(nil, [NSError errorWithDomain:kErrorDomain
-                                                code:500
-                                            userInfo:@{NSLocalizedDescriptionKey: @"Render failed"}]);
+            completion(nil, renderError ?: [NSError errorWithDomain:kErrorDomain
+                                                               code:500
+                                                           userInfo:@{
+                NSLocalizedDescriptionKey: @"Render failed"
+            }]);
         }
     }];
 }
@@ -137,6 +141,7 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
 + (nullable UIImage *)renderWindows:(NSArray<UIWindow *> *)windows
                           providers:(NSArray<id<RNSCFrameProvider>> *)providers
                  excludingStatusBar:(BOOL)excludeStatusBar
+                              error:(NSError **)error
 {
     // Put each frame into the media component's own layer tree, so z-order, clipping and
     // transforms come out right without us computing occlusion, and so the whole thing needs
@@ -159,14 +164,23 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
 
     UIGraphicsImageRenderer *renderer =
         [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size format:format];
+    // drawViewHierarchyInRect: reports failure by returning NO, not by throwing, and
+    // imageWithActions: hands back an image either way. With format.opaque = YES that image is
+    // solid black -- so ignoring the result turns "the system refused to snapshot" into a
+    // screenshot that looks like a legitimately black screen and resolves successfully.
+    __block BOOL primaryDrawn = YES;
     UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
         for (UIWindow *window in windows) {
             // The context is anchored at the primary window's origin, not the screen's, so
             // draw each window where it lands *within that window* -- window.frame is in
             // screen coordinates and is only the same thing when the primary window happens
             // to start at (0,0), which it does not under iPad Split View.
-            [window drawViewHierarchyInRect:[primary convertRect:window.bounds fromWindow:window]
-                         afterScreenUpdates:YES];
+            BOOL drawn =
+                [window drawViewHierarchyInRect:[primary convertRect:window.bounds fromWindow:window]
+                             afterScreenUpdates:YES];
+            // Only the primary window is fatal. A transient overlay -- a keyboard or an alert
+            // window -- refusing to snapshot should not throw away the screenshot underneath it.
+            if (!drawn && window == primary) primaryDrawn = NO;
         }
     }];
 
@@ -174,6 +188,18 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     [CATransaction setDisableActions:YES];
     for (CALayer *placeholder in placeholders) [placeholder removeFromSuperlayer];
     [CATransaction commit];
+
+    if (!primaryDrawn) {
+        if (error) {
+            *error = [NSError errorWithDomain:kErrorDomain code:500 userInfo:@{
+                NSLocalizedDescriptionKey:
+                    @"drawViewHierarchyInRect: refused to snapshot the key window. The app is "
+                    @"usually not in a state the system will render -- backgrounded, mid "
+                    @"transition, or covered by a secure view."
+            }];
+        }
+        return nil;
+    }
 
     if (excludeStatusBar && image) {
         image = [self cropStatusBarFromImage:image window:primary];
