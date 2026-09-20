@@ -29,8 +29,19 @@ export type CaptureOptions = {
   quality?: number
   /** Output scale factor. Defaults to 1 (native size). */
   scale?: number
-  /** Also return the image as base64. Costs an extra encode — off by default. */
+  /** Also return the image as base64. Costs an extra encode -- off by default. */
   includeBase64?: boolean
+  /**
+   * Which screen to capture when the app is driving more than one.
+   *
+   * `all` (default) stitches every screen the app is showing on, side by side, in one image --
+   * an app whose content lives on an external display is captured, not the empty window left
+   * behind on the built-in one. `main` captures only the built-in screen. A numeric string
+   * selects one screen by index.
+   *
+   * Single-screen devices are unaffected: every value produces the same one screen.
+   */
+  screen?: 'all' | 'main' | (string & {})
 }
 
 export type CaptureResult = {

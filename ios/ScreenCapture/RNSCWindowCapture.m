@@ -20,15 +20,26 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
 + (void)captureExcludingStatusBar:(BOOL)excludeStatusBar
                        completion:(void (^)(UIImage *_Nullable, NSError *_Nullable))completion
 {
+    [self captureExcludingStatusBar:excludeStatusBar screen:@"all" completion:completion];
+}
+
++ (void)captureExcludingStatusBar:(BOOL)excludeStatusBar
+                           screen:(NSString *)screenSelector
+                       completion:(void (^)(UIImage *_Nullable, NSError *_Nullable))completion
+{
     if (!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self captureExcludingStatusBar:excludeStatusBar completion:completion];
+            [self captureExcludingStatusBar:excludeStatusBar
+                                     screen:screenSelector
+                                 completion:completion];
         });
         return;
     }
 
-    NSArray<UIWindow *> *windows = [self captureWindows];
-    if (windows.count == 0) {
+    NSArray<NSArray<UIWindow *> *> *groups = [self windowGroupsForSelector:screenSelector];
+    NSMutableArray<UIWindow *> *allWindows = [NSMutableArray array];
+    for (NSArray<UIWindow *> *group in groups) [allWindows addObjectsFromArray:group];
+    if (allWindows.count == 0) {
         completion(nil, [NSError errorWithDomain:kErrorDomain
                                             code:404
                                         userInfo:@{NSLocalizedDescriptionKey: @"No visible window"}]);
@@ -36,15 +47,24 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     }
 
     RNSCProviderRegistry *registry = RNSCProviderRegistry.sharedRegistry;
-    NSArray<id<RNSCFrameProvider>> *providers = [registry attachedProvidersForWindows:windows];
+    NSArray<id<RNSCFrameProvider>> *providers = [registry attachedProvidersForWindows:allWindows];
 
     [self waitForFrames:providers attempt:0 then:^{
         NSError *renderError = nil;
-        UIImage *image = [self renderWindows:windows
-                                   providers:providers
-                          excludingStatusBar:excludeStatusBar
-                                       error:&renderError];
+        NSMutableArray<UIImage *> *perScreen = [NSMutableArray array];
+        for (NSArray<UIWindow *> *group in groups) {
+            // The status bar only exists on the main screen, so only the first group is cropped.
+            BOOL crop = excludeStatusBar && group == groups.firstObject;
+            UIImage *part = [self renderWindows:group
+                                      providers:providers
+                             excludingStatusBar:crop
+                                          error:&renderError];
+            if (!part) break;
+            [perScreen addObject:part];
+        }
         [registry scheduleIdleDetach];
+
+        UIImage *image = perScreen.count == groups.count ? [self composeImages:perScreen] : nil;
         if (image) {
             completion(image, nil);
         } else {
@@ -57,12 +77,81 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     }];
 }
 
+/**
+ * The windows to capture, grouped by the screen they are on, main screen first.
+ *
+ * <p>`selector` is `all` (every screen, stitched), `main` (the built-in screen only), or the
+ * index of a screen in {@code UIScreen.screens}.
+ */
++ (NSArray<NSArray<UIWindow *> *> *)windowGroupsForSelector:(NSString *)selector
+{
+    NSArray<UIScreen *> *screens = UIScreen.screens;
+    NSMutableArray<NSArray<UIWindow *> *> *groups = [NSMutableArray array];
+    NSArray<UIWindow *> *windows = [self captureWindows];
+
+    for (NSUInteger index = 0; index < screens.count; index++) {
+        UIScreen *screen = screens[index];
+        if ([selector isEqualToString:@"main"] && screen != UIScreen.mainScreen) continue;
+        if (![selector isEqualToString:@"all"] && ![selector isEqualToString:@"main"]
+            && ![selector isEqualToString:[NSString stringWithFormat:@"%lu", (unsigned long)index]]) {
+            continue;
+        }
+        NSMutableArray<UIWindow *> *onScreen = [NSMutableArray array];
+        for (UIWindow *window in windows) {
+            UIScreen *windowScreen = window.windowScene.screen ?: window.screen;
+            if (windowScreen == screen) [onScreen addObject:window];
+        }
+        // captureWindows already sorted by windowLevel, so each group keeps back-to-front order.
+        if (onScreen.count > 0) [groups addObject:onScreen];
+    }
+    return groups;
+}
+
+/** Stitches one image per screen side by side, in pixels so mixed screen scales stay exact. */
++ (nullable UIImage *)composeImages:(NSArray<UIImage *> *)images
+{
+    if (images.count == 0) return nil;
+    if (images.count == 1) return images.firstObject;
+
+    CGFloat width = 0, height = 0;
+    for (UIImage *image in images) {
+        CGImageRef cg = image.CGImage;
+        if (!cg) return nil;
+        width += CGImageGetWidth(cg);
+        height = MAX(height, (CGFloat)CGImageGetHeight(cg));
+    }
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = YES;
+    format.scale = 1;
+    UIGraphicsImageRenderer *renderer =
+        [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(width, height) format:format];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        CGFloat x = 0;
+        for (UIImage *image in images) {
+            CGImageRef cg = image.CGImage;
+            CGFloat w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
+            [image drawInRect:CGRectMake(x, 0, w, h)];
+            x += w;
+        }
+    }];
+}
+
+/**
+ * Every window this app is showing, on every screen it is showing on.
+ *
+ * <p>Foreground-*inactive* scenes count. A window driving an external display is not the one the
+ * user is touching, so its scene is routinely inactive -- but it is exactly the content a remote
+ * screenshot is asking for. Only background and unattached scenes are skipped, which keeps a
+ * genuinely backgrounded app reporting "no visible window" rather than a black frame.
+ */
 + (NSArray<UIWindow *> *)captureWindows
 {
     NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+        if (scene.activationState != UISceneActivationStateForegroundActive
+            && scene.activationState != UISceneActivationStateForegroundInactive) continue;
         for (UIWindow *window in ((UIWindowScene *)scene).windows) {
             if (window.isHidden || window.alpha <= 0.01) continue;
             if (CGRectIsEmpty(window.bounds)) continue;

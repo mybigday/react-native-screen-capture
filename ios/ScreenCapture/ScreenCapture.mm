@@ -73,8 +73,10 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
     CGFloat quality = options[@"quality"] ? [options[@"quality"] doubleValue] : 100.0;
     CGFloat scale = options[@"scale"] ? [options[@"scale"] doubleValue] : 1.0;
     BOOL includeBase64 = [options[@"includeBase64"] boolValue];
+    NSString *screen = options[@"screen"] ?: @"all";
 
     [RNSCWindowCapture captureExcludingStatusBar:excludeStatusBar
+                                          screen:screen
                                       completion:^(UIImage *image, NSError *error) {
         if (!image) {
             reject(kErrorCapture, error.localizedDescription ?: @"Capture failed", error);

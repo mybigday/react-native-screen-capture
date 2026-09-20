@@ -64,6 +64,7 @@ type CaptureOptions = {
   quality?: number                          // 1-100, JPEG only, default 100
   scale?: number                            // default 1 (native size)
   includeBase64?: boolean                   // default false
+  screen?: 'all' | 'main' | string          // default 'all'
 }
 
 type CaptureResult = {
@@ -76,6 +77,23 @@ type CaptureResult = {
 
 `includeBase64` costs a second full encode pass. Leave it off unless you need it — the file is
 already written and `uri` works directly in `<Image>`.
+
+#### Multiple screens
+
+Apps that drive an external display often move their content *onto* that display, leaving the
+built-in screen holding an empty window. `screen` decides what a capture returns:
+
+| value | result |
+| --- | --- |
+| `'all'` (default) | every screen the app is showing on, stitched side by side, built-in first |
+| `'main'` | the built-in screen only |
+| a display id | that screen only (iOS: index in `UIScreen.screens`; Android: `Display.getDisplayId()`) |
+
+On a single-screen device all three produce the same image, so there is nothing to set.
+
+On Android the selector applies to `accessibility` mode. `view` mode can only reach the current
+Activity's window, and a secondary display shows its content through a `Presentation`, whose
+window an Activity cannot get at — so `view` mode always returns the Activity's own screen.
 
 Files land in the app's cache directory and are never cleaned up automatically. Call
 `clearCache()` when it suits you.

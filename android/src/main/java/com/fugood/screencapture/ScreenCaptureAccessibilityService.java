@@ -6,6 +6,8 @@ import android.content.pm.PackageManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.hardware.display.DisplayManager;
 import android.hardware.HardwareBuffer;
 import android.os.Build;
 import android.os.Handler;
@@ -15,6 +17,8 @@ import android.text.TextUtils;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -121,10 +125,17 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
     }
 
     static void capture(CaptureCallback callback) {
-        capture(callback, 1);
+        capture(callback, "all");
     }
 
-    private static void capture(final CaptureCallback callback, final int retriesLeft) {
+    /**
+     * Captures one display, or every display this device is driving, stitched side by side.
+     *
+     * <p>{@code screenSelector} is {@code all}, {@code main}, or a display id. Android shows
+     * content on a secondary display through a {@code Presentation}, whose window an Activity
+     * cannot reach -- so this, not the view path, is what sees an external screen.
+     */
+    static void capture(final CaptureCallback callback, final String screenSelector) {
         if (!isSupported()) {
             callback.onResult(null, "Accessibility capture needs Android 11 (API 30) or newer");
             return;
@@ -135,14 +146,111 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                 "Accessibility service is not connected. Enable it in Settings > Accessibility.");
             return;
         }
-        takeScreenshot(service, callback, retriesLeft);
+
+        final int[] displays = resolveDisplays(service, screenSelector);
+        if (displays.length == 0) {
+            callback.onResult(null, "No display matches " + screenSelector);
+            return;
+        }
+        captureDisplays(service, displays, 0, new ArrayList<Bitmap>(), callback);
+    }
+
+    private static int[] resolveDisplays(Context context, String screenSelector) {
+        if (screenSelector == null || "main".equals(screenSelector)) {
+            return new int[] { Display.DEFAULT_DISPLAY };
+        }
+        DisplayManager manager =
+            (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
+        Display[] all = manager != null ? manager.getDisplays() : null;
+        if (all == null || all.length == 0) return new int[] { Display.DEFAULT_DISPLAY };
+
+        if (!"all".equals(screenSelector)) {
+            for (Display display : all) {
+                if (String.valueOf(display.getDisplayId()).equals(screenSelector)) {
+                    return new int[] { display.getDisplayId() };
+                }
+            }
+            return new int[0];
+        }
+
+        // Default display first, so the stitched image starts with the built-in screen.
+        int[] ids = new int[all.length];
+        int next = 1;
+        ids[0] = Display.DEFAULT_DISPLAY;
+        for (Display display : all) {
+            if (display.getDisplayId() == Display.DEFAULT_DISPLAY) continue;
+            ids[next++] = display.getDisplayId();
+        }
+        return next == ids.length ? ids : java.util.Arrays.copyOf(ids, next);
+    }
+
+    /** One display at a time: the platform rate-limits these, and parallel calls just retry. */
+    private static void captureDisplays(final ScreenCaptureAccessibilityService service,
+                                        final int[] displays, final int index,
+                                        final List<Bitmap> collected,
+                                        final CaptureCallback callback) {
+        if (index >= displays.length) {
+            Bitmap stitched = stitch(collected);
+            if (stitched == null) {
+                callback.onResult(null, "Could not compose the captured displays");
+            } else {
+                callback.onResult(stitched, null);
+            }
+            return;
+        }
+        takeScreenshot(service, displays[index], 1, new CaptureCallback() {
+            @Override
+            public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
+                if (bitmap == null) {
+                    // A secondary display that will not yield is not worth failing the whole
+                    // capture over; the built-in screen still has to come back.
+                    if (displays[index] == Display.DEFAULT_DISPLAY) {
+                        for (Bitmap done : collected) done.recycle();
+                        callback.onResult(null, error);
+                        return;
+                    }
+                } else {
+                    collected.add(bitmap);
+                }
+                captureDisplays(service, displays, index + 1, collected, callback);
+            }
+        });
+    }
+
+    /** Side by side, left to right, on a canvas as tall as the tallest display. */
+    @Nullable
+    private static Bitmap stitch(List<Bitmap> parts) {
+        if (parts.isEmpty()) return null;
+        if (parts.size() == 1) return parts.get(0);
+
+        int width = 0, height = 0;
+        for (Bitmap part : parts) {
+            width += part.getWidth();
+            height = Math.max(height, part.getHeight());
+        }
+        Bitmap out;
+        try {
+            out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        } catch (Throwable t) {
+            for (Bitmap part : parts) part.recycle();
+            return null;
+        }
+        Canvas canvas = new Canvas(out);
+        int x = 0;
+        for (Bitmap part : parts) {
+            canvas.drawBitmap(part, x, 0, null);
+            x += part.getWidth();
+            part.recycle();
+        }
+        return out;
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
     private static void takeScreenshot(final ScreenCaptureAccessibilityService service,
-                                       final CaptureCallback callback, final int retriesLeft) {
+                                       final int displayId, final int retriesLeft,
+                                       final CaptureCallback callback) {
         service.takeScreenshot(
-            Display.DEFAULT_DISPLAY,
+            displayId,
             CAPTURE_EXECUTOR,
             new AccessibilityService.TakeScreenshotCallback() {
                 @Override
@@ -187,7 +295,8 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                         new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
                             @Override
                             public void run() {
-                                capture(callback, retriesLeft - 1);
+                                // Retry this display, not the whole selection.
+                                takeScreenshot(service, displayId, retriesLeft - 1, callback);
                             }
                         }, RETRY_DELAY_MS);
                         return;

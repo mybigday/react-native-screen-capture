@@ -89,6 +89,10 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         // too, not here: this method runs on the module thread, and resolving it eagerly would
         // also let it go stale across the service's retry or a rotation.
         final boolean cropStatusBar = MODE_ACCESSIBILITY.equals(mode) && excludeStatusBar;
+        // `view` mode can only reach the current Activity's window; a secondary display shows
+        // its content through a Presentation, whose window an Activity cannot get at. So the
+        // selector is honoured by `accessibility` mode, which asks the platform per display.
+        final String screen = options.hasKey("screen") ? options.getString("screen") : "all";
 
         final CaptureCallback onBitmap = new CaptureCallback() {
             @Override
@@ -108,7 +112,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             // the catch, it would leave the Promise pending forever.
             final CaptureCallback guarded = WindowCapture.once(onBitmap);
             try {
-                ScreenCaptureAccessibilityService.capture(guarded);
+                ScreenCaptureAccessibilityService.capture(guarded, screen);
             } catch (Throwable t) {
                 guarded.onResult(null, String.valueOf(t.getMessage()));
             }
