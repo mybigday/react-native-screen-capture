@@ -210,10 +210,12 @@ whole class of packages, and nothing is required from those packages or from you
 `copyDisplayedPixelBuffer` on it in 17.4. Below that there is no public way to read the layer
 back, and the region renders however `drawViewHierarchyInRect:` leaves it — black, on device.
 
-Metal-backed layers (`CAMetalLayer`, `MTKView` — react-native-skia, react-native-wgpu,
-react-native-webrtc's `RTCMTLVideoView`) need **no** provider: the hierarchy draw renders them
-itself. Only AVFoundation's video planes are out of its reach, not GPU rendering in general.
-`dumpHierarchy()` lists them anyway, so nobody goes looking for a problem that is not there.
+GPU-rendered **app** content needs **no** provider: the hierarchy draw renders it itself. That
+covers `CAMetalLayer` / `MTKView` (react-native-skia, react-native-wgpu, react-native-webrtc's
+`RTCMTLVideoView`) and `CAEAGLLayer` (OpenGL ES — VLC's iOS output, older GL libraries), both
+measured on device. Only AVFoundation's video planes are out of its reach, not GPU rendering in
+general. `dumpHierarchy()` lists Metal layers anyway, so nobody goes looking for a problem that
+is not there.
 
 ### What cannot be captured
 

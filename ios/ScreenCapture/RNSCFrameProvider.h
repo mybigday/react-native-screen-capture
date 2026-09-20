@@ -18,9 +18,10 @@ NS_ASSUME_NONNULL_BEGIN
  * public way around it is to pull the frame out of the framework that owns it, which is what
  * implementations of this protocol do.
  *
- * It is specifically those planes, not GPU rendering in general: a `CAMetalLayer` drawn by the
- * app -- react-native-skia, react-native-wgpu, WebRTC's Metal view -- is captured by the
- * hierarchy draw itself, measured on device, and needs no provider.
+ * It is specifically those planes, not GPU rendering in general. GPU content the app draws
+ * itself is captured by the hierarchy draw and needs no provider: `CAMetalLayer`
+ * (react-native-skia, react-native-wgpu, WebRTC's Metal view) and `CAEAGLLayer` (OpenGL ES,
+ * which is what VLC's iOS output renders into) were both measured on device.
  */
 @protocol RNSCFrameProvider <NSObject>
 
