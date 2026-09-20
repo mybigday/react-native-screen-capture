@@ -6,6 +6,7 @@
 #import "RNSCProviderRegistry.h"
 #import "RNSCCameraFrameProvider.h"
 #import "RNSCPlayerFrameProvider.h"
+#import "RNSCSampleBufferFrameProvider.h"
 
 #if __has_include(<AVKit/AVKit.h>)
 #import <AVKit/AVKit.h>
@@ -23,6 +24,7 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
 #endif
     RNSCMediaLayerKindPlayer,
     RNSCMediaLayerKindSampleBufferDisplay,
+    RNSCMediaLayerKindMetal,
 };
 
 @implementation RNSCProviderRegistry {
@@ -144,8 +146,10 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
 #endif
     if ([layer isKindOfClass:AVPlayerLayer.class]) {
         kind = RNSCMediaLayerKindPlayer;
-    } else if ([NSStringFromClass(layer.class) containsString:@"AVSampleBufferDisplayLayer"]) {
+    } else if ([layer isKindOfClass:AVSampleBufferDisplayLayer.class]) {
         kind = RNSCMediaLayerKindSampleBufferDisplay;
+    } else if ([layer isKindOfClass:(Class)NSClassFromString(@"CAMetalLayer")]) {
+        kind = RNSCMediaLayerKindMetal;
     }
     if (kind != RNSCMediaLayerKindNone) block(layer, kind);
 
@@ -193,8 +197,20 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
                 }];
                 return;
             }
+            case RNSCMediaLayerKindSampleBufferDisplay: {
+                AVSampleBufferDisplayLayer *display = (AVSampleBufferDisplayLayer *)media;
+                NSString *identifier =
+                    [NSString stringWithFormat:@"samplebuffer:%p", display];
+                [self addProviderWithIdentifier:identifier
+                                           into:found
+                                        builder:^id<RNSCFrameProvider> {
+                    return [[RNSCSampleBufferFrameProvider alloc] initWithDisplayLayer:display
+                                                                            targetView:view];
+                }];
+                return;
+            }
             default:
-                // Recognised by the dump, not yet captured.
+                // Recognised by the dump, not capturable.
                 return;
         }
     }];
@@ -267,7 +283,20 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
                 [out appendString:@"  <- AVPlayerLayer, captured via AVPlayerItemVideoOutput"];
                 return;
             case RNSCMediaLayerKindSampleBufferDisplay:
-                [out appendString:@"  <- AVSampleBufferDisplayLayer, NOT captured yet"];
+                if (@available(iOS 17.4, tvOS 17.4, *)) {
+                    [out appendString:
+                        @"  <- AVSampleBufferDisplayLayer, captured via copyDisplayedPixelBuffer"];
+                } else {
+                    [out appendString:
+                        @"  <- AVSampleBufferDisplayLayer, NOT captured (needs iOS 17.4)"];
+                }
+                return;
+            case RNSCMediaLayerKindMetal:
+                // No public API reads back a presented CAMetalLayer drawable, so this is a
+                // dead end rather than a gap to fill: say so where someone will see it.
+                [out appendString:
+                    @"  <- CAMetalLayer, NOT capturable (no public read-back; the renderer "
+                    @"would have to draw into an offscreen texture for us)"];
                 return;
             case RNSCMediaLayerKindNone:
                 return;

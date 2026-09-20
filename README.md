@@ -203,9 +203,21 @@ whole class of packages, and nothing is required from those packages or from you
 | `AVCaptureVideoPreviewLayer.session` | `AVCaptureVideoDataOutput` | react-native-vision-camera, expo-camera, react-native-camera-kit |
 | `AVPlayerLayer.player` | `AVPlayerItemVideoOutput` | anything driving an `AVPlayerLayer` |
 | `AVPlayerViewController.player` | `AVPlayerItemVideoOutput` | react-native-video, expo-video, expo-av |
+| `AVSampleBufferDisplayLayer` | `copyDisplayedPixelBuffer` | low-latency and WebRTC-style players |
 
-`AVSampleBufferDisplayLayer` (react-native-webrtc and some low-latency players) is **not** covered
-yet.
+`AVSampleBufferDisplayLayer` needs **iOS/tvOS 17.4**: `sampleBufferRenderer` arrived in 17.0 and
+`copyDisplayedPixelBuffer` on it in 17.4. Below that there is no public way to read the layer
+back, and the region renders however `drawViewHierarchyInRect:` leaves it — black, on device.
+
+### What cannot be captured
+
+**Metal-backed layers** (`CAMetalLayer`, `MTKView`) — react-native-skia, react-native-wgpu, and
+react-native-webrtc's `RTCMTLVideoView`. No public API reads back a presented Metal drawable, so
+there is nothing to pull a frame out of; the renderer itself would have to draw into an offscreen
+texture and hand it over. `dumpHierarchy()` names these explicitly so they are at least
+diagnosable rather than silently black.
+
+FairPlay-protected video is also out of reach: those frames never leave the secure path.
 
 Android needs no such table: `PixelCopy` works on any `SurfaceView` regardless of what renders
 into it, and `TextureView` draws through the view hierarchy already.
