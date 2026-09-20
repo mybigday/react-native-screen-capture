@@ -93,6 +93,8 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         // its content through a Presentation, whose window an Activity cannot get at. So the
         // selector is honoured by `accessibility` mode, which asks the platform per display.
         final String screen = options.hasKey("screen") ? options.getString("screen") : "all";
+        final boolean markUnsupported =
+            options.hasKey("markUnsupported") && options.getBoolean("markUnsupported");
 
         final CaptureCallback onBitmap = new CaptureCallback() {
             @Override
@@ -124,7 +126,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             promise.reject(E_NO_ACTIVITY, "No current activity");
             return;
         }
-        WindowCapture.capture(activity, excludeStatusBar, onBitmap);
+        WindowCapture.capture(activity, excludeStatusBar, markUnsupported, onBitmap);
     }
 
     private void encode(final Bitmap source, final String extension, final int quality,

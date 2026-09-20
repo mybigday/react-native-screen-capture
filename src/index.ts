@@ -42,6 +42,19 @@ export type CaptureOptions = {
    * Single-screen devices are unaffected: every value produces the same one screen.
    */
   screen?: 'all' | 'main' | (string & {})
+  /**
+   * Draw a labelled box over any region this library cannot capture, instead of leaving it
+   * blank. Off by default.
+   *
+   * The label goes into the component's own layer tree, so anything drawn above it on screen
+   * covers the label too -- z-order, clipping and transforms behave exactly as they do for a
+   * captured frame.
+   *
+   * Marked today: DRM-protected video, a capture session that refused an output, an
+   * `AVSampleBufferDisplayLayer` below iOS 17.4, and Android surfaces whose read-back the
+   * system refuses (`SurfaceView`s flagged secure).
+   */
+  markUnsupported?: boolean
 }
 
 export type CaptureResult = {

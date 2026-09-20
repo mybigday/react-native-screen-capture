@@ -65,6 +65,7 @@ type CaptureOptions = {
   scale?: number                            // default 1 (native size)
   includeBase64?: boolean                   // default false
   screen?: 'all' | 'main' | string          // default 'all'
+  markUnsupported?: boolean                 // default false
 }
 
 type CaptureResult = {
@@ -218,7 +219,19 @@ itself. Only AVFoundation's video planes are out of its reach, not GPU rendering
 
 FairPlay-protected video: those frames never leave the secure path, so no output can read them.
 An `AVSampleBufferDisplayLayer` below iOS 17.4 is unreachable for the same practical reason — no
-public read-back exists on that OS.
+public read-back exists on that OS. On Android the equivalent is a `SurfaceView` the system
+refuses to read back, which is how DRM playback presents itself.
+
+`markUnsupported: true` labels those regions instead of leaving them blank:
+
+```js
+await ScreenCapture.capture({ markUnsupported: true })
+```
+
+The label is inserted into the component's own layer tree — above the media layer on iOS, in the
+view's `ViewOverlay` on Android — so whatever covers the component on screen covers the label
+too. Occlusion, clipping and transforms stay the platform's job, exactly as for a captured
+frame.
 
 Android needs no such table: `PixelCopy` works on any `SurfaceView` regardless of what renders
 into it, and `TextureView` draws through the view hierarchy already.

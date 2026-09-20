@@ -26,6 +26,7 @@ NS_ASSUME_NONNULL_BEGIN
  */
 + (void)captureExcludingStatusBar:(BOOL)excludeStatusBar
                            screen:(NSString *)screenSelector
+                  markUnsupported:(BOOL)markUnsupported
                        completion:(void (^)(UIImage *_Nullable image,
                                             NSError *_Nullable error))completion;
 

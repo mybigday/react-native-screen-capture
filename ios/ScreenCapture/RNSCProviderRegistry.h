@@ -18,6 +18,13 @@ NS_ASSUME_NONNULL_BEGIN
  * Providers are attached lazily and detached again after a few idle seconds, so an app that
  * never calls `capture()` pays nothing at all.
  */
+/** A media layer we can see but cannot read, and why. */
+@interface RNSCUnreachableLayer : NSObject
+@property (nonatomic, weak, readonly, nullable) UIView *targetView;
+@property (nonatomic, weak, readonly, nullable) CALayer *mediaLayer;
+@property (nonatomic, copy, readonly) NSString *reason;
+@end
+
 @interface RNSCProviderRegistry : NSObject
 
 @property (class, nonatomic, readonly) RNSCProviderRegistry *sharedRegistry;
@@ -32,6 +39,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 /** Backs the dev-only `dumpHierarchy()`. */
 - (NSString *)describeWindows:(NSArray<UIWindow *> *)windows;
+
+/**
+ * Media layers this build recognises but cannot pull a frame from on this OS.
+ *
+ * Today that is an `AVSampleBufferDisplayLayer` below iOS 17.4, where no public read-back
+ * exists. They are reported so `capture({ markUnsupported: true })` can label the region
+ * instead of leaving a black rectangle nobody can explain.
+ */
+- (NSArray<RNSCUnreachableLayer *> *)unreachableLayersForWindows:(NSArray<UIWindow *> *)windows;
 
 @end
 

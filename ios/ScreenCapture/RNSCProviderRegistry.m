@@ -27,6 +27,28 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
     RNSCMediaLayerKindMetal,
 };
 
+@implementation RNSCUnreachableLayer {
+    __weak UIView *_targetView;
+    __weak CALayer *_mediaLayer;
+}
+@synthesize reason = _reason;
+
+- (instancetype)initWithView:(UIView *)view layer:(CALayer *)layer reason:(NSString *)reason
+{
+    self = [super init];
+    if (self) {
+        _targetView = view;
+        _mediaLayer = layer;
+        _reason = [reason copy];
+    }
+    return self;
+}
+
+- (UIView *)targetView { return _targetView; }
+- (CALayer *)mediaLayer { return _mediaLayer; }
+
+@end
+
 @implementation RNSCProviderRegistry {
     NSMutableDictionary<NSString *, id<RNSCFrameProvider>> *_providers;
     NSTimer *_idleTimer;
@@ -239,6 +261,30 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
     if (cached) [cached detach];
     _providers[identifier] = provider;
     [found addObject:provider];
+}
+
+- (NSArray<RNSCUnreachableLayer *> *)unreachableLayersForWindows:(NSArray<UIWindow *> *)windows
+{
+    NSMutableArray<RNSCUnreachableLayer *> *found = [NSMutableArray array];
+    for (UIWindow *window in windows) {
+        [self collectUnreachableInView:window into:found];
+    }
+    return found;
+}
+
+- (void)collectUnreachableInView:(UIView *)view
+                            into:(NSMutableArray<RNSCUnreachableLayer *> *)found
+{
+    if (view.hidden || view.alpha <= 0.01) return;
+    [self enumerateMediaLayersIn:view.layer using:^(CALayer *media, RNSCMediaLayerKind kind) {
+        if (kind != RNSCMediaLayerKindSampleBufferDisplay) return;
+        if (@available(iOS 17.4, tvOS 17.4, *)) return;   // a provider covers it
+        [found addObject:[[RNSCUnreachableLayer alloc]
+            initWithView:view
+                   layer:media
+                  reason:@"AVSampleBufferDisplayLayer needs iOS 17.4"]];
+    }];
+    for (UIView *subview in view.subviews) [self collectUnreachableInView:subview into:found];
 }
 
 #pragma mark - Debugging

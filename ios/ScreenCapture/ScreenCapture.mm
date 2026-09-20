@@ -74,9 +74,11 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
     CGFloat scale = options[@"scale"] ? [options[@"scale"] doubleValue] : 1.0;
     BOOL includeBase64 = [options[@"includeBase64"] boolValue];
     NSString *screen = options[@"screen"] ?: @"all";
+    BOOL markUnsupported = [options[@"markUnsupported"] boolValue];
 
     [RNSCWindowCapture captureExcludingStatusBar:excludeStatusBar
                                           screen:screen
+                                 markUnsupported:markUnsupported
                                       completion:^(UIImage *image, NSError *error) {
         if (!image) {
             reject(kErrorCapture, error.localizedDescription ?: @"Capture failed", error);

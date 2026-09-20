@@ -20,17 +20,22 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
 + (void)captureExcludingStatusBar:(BOOL)excludeStatusBar
                        completion:(void (^)(UIImage *_Nullable, NSError *_Nullable))completion
 {
-    [self captureExcludingStatusBar:excludeStatusBar screen:@"all" completion:completion];
+    [self captureExcludingStatusBar:excludeStatusBar
+                             screen:@"all"
+                   markUnsupported:NO
+                         completion:completion];
 }
 
 + (void)captureExcludingStatusBar:(BOOL)excludeStatusBar
                            screen:(NSString *)screenSelector
+                  markUnsupported:(BOOL)markUnsupported
                        completion:(void (^)(UIImage *_Nullable, NSError *_Nullable))completion
 {
     if (!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self captureExcludingStatusBar:excludeStatusBar
                                      screen:screenSelector
+                            markUnsupported:markUnsupported
                                  completion:completion];
         });
         return;
@@ -65,6 +70,7 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
             UIImage *part = [self renderWindows:group
                                       providers:onScreen
                              excludingStatusBar:crop
+                                markUnsupported:markUnsupported
                                           error:&renderError];
             if (!part) break;
             [perScreen addObject:part];
@@ -263,6 +269,7 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
 + (nullable UIImage *)renderWindows:(NSArray<UIWindow *> *)windows
                           providers:(NSArray<id<RNSCFrameProvider>> *)providers
                  excludingStatusBar:(BOOL)excludeStatusBar
+                    markUnsupported:(BOOL)markUnsupported
                               error:(NSError **)error
 {
     // Put each frame into the media component's own layer tree, so z-order, clipping and
@@ -272,8 +279,18 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     for (id<RNSCFrameProvider> provider in providers) {
-        CALayer *placeholder = [self installPlaceholderForProvider:provider];
+        CALayer *placeholder = [self installPlaceholderForProvider:provider
+                                                   markUnsupported:markUnsupported];
         if (placeholder) [placeholders addObject:placeholder];
+    }
+    if (markUnsupported) {
+        // Layers we can see but cannot read on this OS. Marked through the same insertion
+        // point as the placeholders, so anything drawn over them still covers the label.
+        for (RNSCUnreachableLayer *item in
+             [RNSCProviderRegistry.sharedRegistry unreachableLayersForWindows:windows]) {
+            CALayer *marker = [self installMarkerForUnreachable:item];
+            if (marker) [placeholders addObject:marker];
+        }
     }
     [CATransaction commit];
 
@@ -329,20 +346,92 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     return image;
 }
 
+/**
+ * Builds the label drawn over a region this build cannot capture.
+ *
+ * It goes in as a layer at the same insertion point a placeholder would, so whatever sits above
+ * the media component on screen covers the label too -- occlusion, clipping and transforms stay
+ * the platform's job rather than arithmetic here.
+ */
++ (CALayer *)markerLayerWithReason:(NSString *)reason rect:(CGRect)rect
+{
+    CALayer *marker = [CALayer layer];
+    marker.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55].CGColor;
+    marker.borderColor = [UIColor colorWithRed:1 green:0.23 blue:0.19 alpha:0.9].CGColor;
+    marker.borderWidth = 2;
+    marker.masksToBounds = YES;
+    marker.bounds = CGRectMake(0, 0, CGRectGetWidth(rect), CGRectGetHeight(rect));
+    marker.position = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
+
+    CGFloat fontSize = MIN(MAX(CGRectGetHeight(rect) / 12.0, 11.0), 22.0);
+    CATextLayer *text = [CATextLayer layer];
+    text.string = reason;
+    text.wrapped = YES;
+    text.alignmentMode = kCAAlignmentCenter;
+    text.fontSize = fontSize;
+    text.foregroundColor = UIColor.whiteColor.CGColor;
+    text.contentsScale = UIScreen.mainScreen.scale;
+    // Three lines' worth, centred: enough for the longest reason without measuring.
+    CGFloat textHeight = MIN(fontSize * 3.6, CGRectGetHeight(rect));
+    text.frame = CGRectMake(6,
+                            (CGRectGetHeight(rect) - textHeight) / 2.0,
+                            MAX(CGRectGetWidth(rect) - 12, 1),
+                            textHeight);
+    [marker addSublayer:text];
+    return marker;
+}
+
+/** Puts a marker over a layer we recognise but cannot read on this OS. */
++ (nullable CALayer *)installMarkerForUnreachable:(RNSCUnreachableLayer *)item
+{
+    UIView *target = item.targetView;
+    CALayer *media = item.mediaLayer;
+    if (!target || !media) return nil;
+
+    CALayer *host = media.superlayer ?: target.layer;
+    CGRect rect = media.superlayer ? media.frame : target.bounds;
+    if (CGRectIsEmpty(rect)) return nil;
+
+    CALayer *marker = [self markerLayerWithReason:item.reason rect:rect];
+    if (media.superlayer) {
+        [host insertSublayer:marker above:media];
+    } else {
+        marker.zPosition = kPlaceholderZPosition;
+        [host addSublayer:marker];
+    }
+    return marker;
+}
+
 + (nullable CALayer *)installPlaceholderForProvider:(id<RNSCFrameProvider>)provider
+                                    markUnsupported:(BOOL)markUnsupported
 {
     UIView *target = provider.targetView;
     if (!target) return nil;
 
     CGImageRef frame = [provider newFrameImage];
-    if (!frame) return nil;
 
     CALayer *media = provider.mediaLayer;
     CALayer *host = media.superlayer ?: target.layer;
     CGRect rect = media ? media.frame : target.bounds;
     if (CGRectIsEmpty(rect)) {
-        CGImageRelease(frame);
+        if (frame) CGImageRelease(frame);
         return nil;
+    }
+
+    if (!frame) {
+        // Attached, but the pipeline yielded nothing -- DRM-protected video, or a capture
+        // session that refused an output. Without marking, this region simply renders black.
+        if (!markUnsupported) return nil;
+        CALayer *marker =
+            [self markerLayerWithReason:@"No frame available (protected or unavailable)"
+                                   rect:rect];
+        if (media && media.superlayer) {
+            [host insertSublayer:marker above:media];
+        } else {
+            marker.zPosition = kPlaceholderZPosition;
+            [host addSublayer:marker];
+        }
+        return marker;
     }
 
     CALayer *placeholder = [CALayer layer];

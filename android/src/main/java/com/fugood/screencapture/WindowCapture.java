@@ -4,8 +4,13 @@ import android.app.Activity;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
+import android.text.TextPaint;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -17,6 +22,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import java.util.ArrayList;
@@ -62,6 +68,7 @@ final class WindowCapture {
     }
 
     static void capture(final Activity activity, final boolean excludeStatusBar,
+                        final boolean markUnsupported,
                         final CaptureCallback rawCallback) {
         // Every path below settles through this, so a throw escaping a callback cannot come back
         // round through a catch and settle the Promise a second time.
@@ -74,7 +81,7 @@ final class WindowCapture {
             @Override
             public void run() {
                 try {
-                    captureOnUiThread(activity, excludeStatusBar, callback);
+                    captureOnUiThread(activity, excludeStatusBar, markUnsupported, callback);
                 } catch (Throwable t) {
                     callback.onResult(null, String.valueOf(t.getMessage()));
                 }
@@ -98,6 +105,7 @@ final class WindowCapture {
     }
 
     private static void captureOnUiThread(final Activity activity, final boolean excludeStatusBar,
+                                          final boolean markUnsupported,
                                           final CaptureCallback callback) {
         final Window window = activity.getWindow();
         if (window == null) {
@@ -121,7 +129,7 @@ final class WindowCapture {
 
         // Everything from here runs from Handler callbacks, i.e. outside capture()'s try. An
         // uncaught throw there would crash the main thread and leave the overlays installed.
-        copySurfaceViews(surfaceViews, overlays, new Runnable() {
+        copySurfaceViews(surfaceViews, overlays, markUnsupported, new Runnable() {
             @Override
             public void run() {
                 try {
@@ -151,7 +159,7 @@ final class WindowCapture {
      * SurfaceViews had a worst case of N x 5s.
      */
     private static void copySurfaceViews(final List<SurfaceView> views, final List<Overlay> overlays,
-                                         final Runnable done) {
+                                         final boolean markUnsupported, final Runnable done) {
         final AtomicInteger pending = new AtomicInteger(views.size());
         final AtomicBoolean finished = new AtomicBoolean(false);
         final Runnable finish = new Runnable() {
@@ -200,9 +208,16 @@ final class WindowCapture {
                         // A copy that lands after the deadline below must not install an overlay
                         // nobody is going to remove.
                         if (copyResult != PixelCopy.SUCCESS || finished.get()) {
-                            // Secure or DRM-protected surfaces land here too; the hole stays
-                            // transparent.
+                            // Secure or DRM-protected surfaces land here; without marking the
+                            // hole just stays transparent.
                             bitmap.recycle();
+                            if (markUnsupported && !finished.get()) {
+                                Drawable marker = new MarkerDrawable(
+                                    "Protected surface - not capturable");
+                                marker.setBounds(0, 0, width, height);
+                                view.getOverlay().add(marker);
+                                overlays.add(new Overlay(view, marker, null));
+                            }
                         } else {
                             BitmapDrawable drawable = new BitmapDrawable(view.getResources(), bitmap);
                             drawable.setBounds(0, 0, width, height);
@@ -353,7 +368,7 @@ final class WindowCapture {
     private static void removeOverlays(final List<Overlay> overlays) {
         for (Overlay overlay : overlays) {
             overlay.view.getOverlay().remove(overlay.drawable);
-            overlay.bitmap.recycle();
+            if (overlay.bitmap != null) overlay.bitmap.recycle();
         }
         overlays.clear();
     }
@@ -443,12 +458,50 @@ final class WindowCapture {
         }
     }
 
+    /**
+     * Drawn over a surface this build cannot read, in the view's own overlay -- so whatever the
+     * hierarchy draws above the SurfaceView covers the label too, and occlusion stays the
+     * platform's job.
+     */
+    private static final class MarkerDrawable extends Drawable {
+        private final String text;
+        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final TextPaint label = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+
+        MarkerDrawable(String text) {
+            this.text = text;
+            fill.setColor(0x8C000000);
+            border.setStyle(Paint.Style.STROKE);
+            border.setStrokeWidth(4f);
+            border.setColor(0xE6FF3B30);
+            label.setColor(0xFFFFFFFF);
+            label.setTextAlign(Paint.Align.CENTER);
+        }
+
+        @Override
+        public void draw(@NonNull Canvas canvas) {
+            Rect b = getBounds();
+            canvas.drawRect(b, fill);
+            canvas.drawRect(b.left + 2, b.top + 2, b.right - 2, b.bottom - 2, border);
+            label.setTextSize(Math.max(Math.min(b.height() / 12f, 48f), 20f));
+            Paint.FontMetrics fm = label.getFontMetrics();
+            float y = b.exactCenterY() - (fm.ascent + fm.descent) / 2f;
+            canvas.drawText(text, b.exactCenterX(), y, label);
+        }
+
+        @Override public void setAlpha(int alpha) {}
+        @Override public void setColorFilter(@Nullable ColorFilter filter) {}
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
     private static final class Overlay {
         final SurfaceView view;
-        final BitmapDrawable drawable;
-        final Bitmap bitmap;
+        final Drawable drawable;
+        /** Null for a marker, which owns no bitmap. */
+        @Nullable final Bitmap bitmap;
 
-        Overlay(SurfaceView view, BitmapDrawable drawable, Bitmap bitmap) {
+        Overlay(SurfaceView view, Drawable drawable, @Nullable Bitmap bitmap) {
             this.view = view;
             this.drawable = drawable;
             this.bitmap = bitmap;
