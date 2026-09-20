@@ -174,7 +174,10 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
         }
 
         // Default display first, so the stitched image starts with the built-in screen.
-        int[] ids = new int[all.length];
+        // Sized for every enumerated display *plus* the default one: getDisplays() is not
+        // contractually obliged to include it, and if it does not, the loop below would run off
+        // the end of an array sized to all.length.
+        int[] ids = new int[all.length + 1];
         int next = 1;
         ids[0] = Display.DEFAULT_DISPLAY;
         for (Display display : all) {

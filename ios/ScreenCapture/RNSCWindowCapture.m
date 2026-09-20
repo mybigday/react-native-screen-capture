@@ -55,8 +55,15 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
         for (NSArray<UIWindow *> *group in groups) {
             // The status bar only exists on the main screen, so only the first group is cropped.
             BOOL crop = excludeStatusBar && group == groups.firstObject;
+            // Only the providers on this screen: installing a placeholder into another
+            // screen's layer tree, once per group, is wasted frame pulls and needless churn.
+            NSMutableArray<id<RNSCFrameProvider>> *onScreen = [NSMutableArray array];
+            for (id<RNSCFrameProvider> provider in providers) {
+                UIWindow *host = provider.targetView.window;
+                if (host && [group containsObject:host]) [onScreen addObject:provider];
+            }
             UIImage *part = [self renderWindows:group
-                                      providers:providers
+                                      providers:onScreen
                              excludingStatusBar:crop
                                           error:&renderError];
             if (!part) break;
@@ -85,24 +92,50 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
  */
 + (NSArray<NSArray<UIWindow *> *> *)windowGroupsForSelector:(NSString *)selector
 {
-    NSArray<UIScreen *> *screens = UIScreen.screens;
-    NSMutableArray<NSArray<UIWindow *> *> *groups = [NSMutableArray array];
     NSArray<UIWindow *> *windows = [self captureWindows];
 
-    for (NSUInteger index = 0; index < screens.count; index++) {
-        UIScreen *screen = screens[index];
-        if ([selector isEqualToString:@"main"] && screen != UIScreen.mainScreen) continue;
-        if (![selector isEqualToString:@"all"] && ![selector isEqualToString:@"main"]
-            && ![selector isEqualToString:[NSString stringWithFormat:@"%lu", (unsigned long)index]]) {
-            continue;
-        }
-        NSMutableArray<UIWindow *> *onScreen = [NSMutableArray array];
-        for (UIWindow *window in windows) {
-            UIScreen *windowScreen = window.windowScene.screen ?: window.screen;
-            if (windowScreen == screen) [onScreen addObject:window];
+    // Grouped from the windows themselves rather than by walking UIScreen.screens: that is
+    // deprecated as of iOS 16, and Apple's replacement is scene-based. Walking it would mean a
+    // window whose screen it no longer lists is dropped -- silently reintroducing exactly the
+    // bug this grouping exists to fix.
+    NSMutableArray<UIScreen *> *order = [NSMutableArray array];
+    NSMutableArray<NSMutableArray<UIWindow *> *> *lists = [NSMutableArray array];
+    for (UIWindow *window in windows) {
+        UIScreen *screen = window.windowScene.screen ?: window.screen ?: UIScreen.mainScreen;
+        NSUInteger at = [order indexOfObjectIdenticalTo:screen];
+        if (at == NSNotFound) {
+            [order addObject:screen];
+            [lists addObject:[NSMutableArray array]];
+            at = order.count - 1;
         }
         // captureWindows already sorted by windowLevel, so each group keeps back-to-front order.
-        if (onScreen.count > 0) [groups addObject:onScreen];
+        [lists[at] addObject:window];
+    }
+
+    // Built-in screen first, so a stitched image always starts where a reader expects.
+    NSUInteger mainAt = [order indexOfObjectIdenticalTo:UIScreen.mainScreen];
+    if (mainAt != NSNotFound && mainAt != 0) {
+        UIScreen *main = order[mainAt];
+        NSMutableArray<UIWindow *> *mainList = lists[mainAt];
+        [order removeObjectAtIndex:mainAt];
+        [lists removeObjectAtIndex:mainAt];
+        [order insertObject:main atIndex:0];
+        [lists insertObject:mainList atIndex:0];
+    }
+
+    NSMutableArray<NSArray<UIWindow *> *> *groups = [NSMutableArray array];
+    for (NSUInteger i = 0; i < order.count; i++) {
+        UIScreen *screen = order[i];
+        if ([selector isEqualToString:@"main"]) {
+            if (screen != UIScreen.mainScreen) continue;
+        } else if (![selector isEqualToString:@"all"]) {
+            // A numeric selector means an index into UIScreen.screens, as documented.
+            NSUInteger known = [UIScreen.screens indexOfObjectIdenticalTo:screen];
+            NSString *label = known == NSNotFound
+                ? nil : [NSString stringWithFormat:@"%lu", (unsigned long)known];
+            if (!label || ![selector isEqualToString:label]) continue;
+        }
+        [groups addObject:lists[i]];
     }
     return groups;
 }
