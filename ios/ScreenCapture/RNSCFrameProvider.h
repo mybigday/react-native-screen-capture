@@ -12,11 +12,15 @@ NS_ASSUME_NONNULL_BEGIN
 /**
  * Supplies the current frame of a media component that Core Graphics cannot render.
  *
- * `drawViewHierarchyInRect:` goes through Core Graphics, so layers that are composited by the
- * GPU / render server -- AVPlayerLayer, AVCaptureVideoPreviewLayer, AVSampleBufferDisplayLayer --
- * come out black on device (they render fine in the Simulator, which is what makes this look
- * like it works). The only public way around it is to pull the frame out of the framework that
- * owns it, which is what implementations of this protocol do.
+ * `drawViewHierarchyInRect:` cannot see AVFoundation's video planes -- AVPlayerLayer,
+ * AVCaptureVideoPreviewLayer, AVSampleBufferDisplayLayer -- which come out black on device
+ * (they render fine in the Simulator, which is what makes this look like it works). The only
+ * public way around it is to pull the frame out of the framework that owns it, which is what
+ * implementations of this protocol do.
+ *
+ * It is specifically those planes, not GPU rendering in general: a `CAMetalLayer` drawn by the
+ * app -- react-native-skia, react-native-wgpu, WebRTC's Metal view -- is captured by the
+ * hierarchy draw itself, measured on device, and needs no provider.
  */
 @protocol RNSCFrameProvider <NSObject>
 

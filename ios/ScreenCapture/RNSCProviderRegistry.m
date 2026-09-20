@@ -292,11 +292,11 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
                 }
                 return;
             case RNSCMediaLayerKindMetal:
-                // No public API reads back a presented CAMetalLayer drawable, so this is a
-                // dead end rather than a gap to fill: say so where someone will see it.
+                // Listed so nobody goes hunting for a provider that is not needed: measured on
+                // an iPhone XR, drawViewHierarchyInRect: renders Metal content itself. What it
+                // cannot reach is AVFoundation's hardware video planes, not the GPU generally.
                 [out appendString:
-                    @"  <- CAMetalLayer, NOT capturable (no public read-back; the renderer "
-                    @"would have to draw into an offscreen texture for us)"];
+                    @"  <- CAMetalLayer, captured directly by the hierarchy draw"];
                 return;
             case RNSCMediaLayerKindNone:
                 return;
