@@ -170,5 +170,7 @@ writes. All sampled/final owned-cache counts were zero. Each platform also passe
 and same-process foreground/focus recovery, plus two manually fed camera composite PNGs with
 host delegate/queue restoration. The 66 selected raw images decoded without whole-black output;
 AV regions exceeded 500 distinct colors and camera control/mask samples matched fixture colors
-(XR exact, Mac within 32 per RGB channel). These are bounded, synthetic own-app regressions;
+(XR exact, Mac within 32 per RGB channel). The AV runs preceded the final camera-only identity-snapshot guards; their render/encode
+sources match the final source. Camera and full API/reload runs were repeated after those guards.
+These are bounded, synthetic own-app regressions;
 they do not establish that the reported BRICKS 2.25.11 build is fixed or prove absence of leaks.
