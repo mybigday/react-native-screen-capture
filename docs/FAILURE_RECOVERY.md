@@ -102,7 +102,13 @@ architecture example APKs built successfully; their DEX superclasses were checke
 The complete native tvOS fixture compiled and linked without signing or installation.
 It also compiled and linked against the tvOS Simulator SDK. A corrected read-only
 `simctl list devices available --json` query found three existing tvOS 26.5 simulators,
-all shut down. They were not booted or installed with a fixture in these runs.
+all shut down at inventory time. An existing Apple TV 4K third-generation 1080p
+simulator then ran a uniquely identified synthetic fixture: two static, eight AV and
+twelve same-player remount captures completed without callback errors or whole-black
+images. All post-remount provider frames targeted the new host. The fixture was removed
+and the simulator returned to its original shutdown state. File-based fixture output
+completed after an initial console-streaming run timed out; that partial evidence was
+retained. This is native-core simulator coverage, not physical tvOS media evidence.
 
 Still required: live camera capture with a controlled chart, physical Android/tvOS runtime
 tests, sleep/lock recovery, external-display transitions and simultaneous OS-screen
