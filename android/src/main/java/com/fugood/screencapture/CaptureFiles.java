@@ -12,9 +12,20 @@ final class CaptureFiles {
     interface Writer {
         void write(OutputStream output) throws IOException;
     }
+    interface IdentityChecker {
+        /** Null means the path is absent; other IO errors must propagate. */
+        Object pathKey(File file) throws IOException;
+        Object openedKey(FileOutputStream output, File path) throws IOException;
+    }
     private final File directory;
+    private final IdentityChecker identity;
 
-    CaptureFiles(File cache) { directory = new File(cache, "react-native-screen-capture"); }
+    CaptureFiles(File cache) { this(cache, null); }
+
+    CaptureFiles(File cache, IdentityChecker identity) {
+        directory = new File(cache, "react-native-screen-capture");
+        this.identity = identity;
+    }
 
     File publish(String extension, Writer writer) throws IOException {
         synchronized (CaptureFiles.class) { return publishLocked(extension, writer); }
@@ -25,34 +36,74 @@ final class CaptureFiles {
             !directory.getCanonicalFile().equals(directory.getAbsoluteFile())) {
             throw new IOException("Capture cache is not a regular directory");
         }
+        Object directoryKey = requiredPathKey(directory);
         File pending = File.createTempFile("CAPTURE-", ".pending", directory);
         File completed = new File(directory, "CAPTURE-" + UUID.randomUUID() + "." + extension);
         boolean published = false;
+        Object pendingKey = null;
         Throwable failure = null;
         try {
-            try (FileOutputStream output = new FileOutputStream(pending)) {
+            pendingKey = requiredPathKey(pending);
+            checkPathKey(directory, directoryKey);
+            // The newly created pending file is empty. Do not truncate a replacement inode
+            // before the opened descriptor has passed its identity checks.
+            try (FileOutputStream output = new FileOutputStream(pending, true)) {
+                if (identity != null) {
+                    Object opened = identity.openedKey(output, pending);
+                    if (opened == null || !opened.equals(pendingKey))
+                        throw new IOException("Capture pending file changed while opening");
+                    pendingKey = opened;
+                }
+                checkPathKey(directory, directoryKey);
+                checkPathKey(pending, pendingKey);
                 writer.write(output);
                 output.flush();
+                // Keep the descriptor open through validation and rename. These identity checks
+                // reject controlled purge/substitution; they are not atomic with arbitrary host IO.
+                checkPathKey(directory, directoryKey);
+                checkPathKey(pending, pendingKey);
+                if (pending.length() == 0)
+                    throw new IOException("Encoder returned no image bytes");
+                if (!pending.renameTo(completed))
+                    throw new IOException("Could not publish capture file");
+                checkPathKey(directory, directoryKey);
+                checkPathKey(completed, pendingKey);
             }
-            if (pending.length() == 0)
-                throw new IOException("Encoder returned no image bytes");
-            if (!pending.renameTo(completed))
-                throw new IOException("Could not publish capture file");
             published = true;
             return completed;
         } catch (IOException | RuntimeException | Error error) {
             failure = error;
             throw error;
         } finally {
-            if (!published && pending.exists() && !pending.delete()) {
-                IOException cleanup =
-                    new IOException("Could not remove failed capture " + pending.getName());
-                if (failure != null)
-                    failure.addSuppressed(cleanup);
-                else
-                    throw cleanup;
+            if (!published) {
+                for (File candidate : new File[] {pending, completed}) {
+                    try { removeMatchingFile(candidate, pendingKey); }
+                    catch (IOException | RuntimeException | Error cleanup) {
+                        if (failure != null) failure.addSuppressed(cleanup);
+                        else throw cleanup;
+                    }
+                }
             }
         }
+    }
+
+    private Object requiredPathKey(File file) throws IOException {
+        if (identity == null) return null;
+        Object key = identity.pathKey(file);
+        if (key == null) throw new IOException("Capture file identity is unavailable");
+        return key;
+    }
+
+    private void checkPathKey(File file, Object expected) throws IOException {
+        if (identity != null && !expected.equals(identity.pathKey(file)))
+            throw new IOException("Capture path changed while encoding: " + file.getName());
+    }
+
+    private void removeMatchingFile(File file, Object expected) throws IOException {
+        if (!file.exists()) return;
+        // Skip a path if its current identity differs from this publication's descriptor.
+        if (identity != null && (expected == null || !expected.equals(identity.pathKey(file)))) return;
+        if (!file.delete()) throw new IOException("Could not remove failed capture " + file.getName());
     }
 
     boolean release(String uri) throws IOException {

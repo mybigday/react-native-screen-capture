@@ -79,6 +79,22 @@ async function main() {
     assert.equal(options.probeBranch, 'candidate'); assert.equal(options.scale, 0.4)
     assert.equal(await x.api.releaseCapture('file:///owned.png'), 'file:///owned.png')
   })
+  await test('auto refreshes service availability while foreground and shares pending probes', async () => {
+    const x = load(); let status = 'granted'; let probes = 0
+    x.native.getPermissionStatus = async () => { probes++; return status }
+    assert.equal((await x.api.capture()).mode, 'accessibility')
+    status = 'denied'
+    assert.equal((await x.api.capture()).mode, 'view')
+    status = 'granted'
+    assert.equal((await x.api.capture()).mode, 'accessibility')
+    assert.equal(probes, 3)
+    let finish
+    x.native.getPermissionStatus = () => { probes++; return new Promise(r => finish = r) }
+    const a = x.api.capture(); const b = x.api.capture()
+    assert.equal(probes, 4)
+    finish('granted')
+    assert.equal((await a).mode, 'accessibility'); assert.equal((await b).mode, 'accessibility')
+  })
   console.log(JSON.stringify(results, null, 2))
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

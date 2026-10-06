@@ -29,7 +29,7 @@ the host cache root are retained because a filename prefix does not establish ow
 ## Validation and remaining limits
 
 The checks in [tests/README.md](../tests/README.md) exercise production control flow and real
-filesystem operations with safe injected failures. They cover five JS lifecycle groups,
+filesystem operations with safe injected failures. Initial checks covered five JS lifecycle groups,
 133 Java filesystem assertions, 11 extracted Android request checks and 302 native
 Foundation/control-flow/CoreVideo checks. TypeScript, library codegen, Android legacy/new
 architecture compilation and 16 Apple SDK syntax checks also passed.
@@ -116,3 +116,59 @@ readback. Only one physical Mac display was available. The installed BRICKS vers
 differed from the reported failing build, so these fixtures do not establish that the
 reported application regression is fixed. Injected storage errors and bounded memory
 runs do not exclude every real disk-full, OOM or resource failure.
+
+
+## Follow-up failure-mode audit
+
+A later audit adds fixes for independently reproduced failures:
+
+- Choose the key window (otherwise the largest visible window) for the viewport independently
+  from composition order. Revalidate that choice after waiting for media. A 1×1 low-level
+  auxiliary window previously clipped a full-window capture to 2×2 pixels.
+- Insert media replacements below negative-z children too. A physical-iPhone control at z=-1
+  was visible in a direct UIKit snapshot but covered by the library; all 14 geometry samples
+  passed after correction.
+- Match camera readers and borrowed outputs by session and video input-port identity. Mixed
+  outputs or unidentified live streams refuse attachment rather than returning another stream's
+  pixels. Reader identifiers and registry ownership use the same initialization snapshot.
+  Inputless synthetic sessions remain supported. Refused attachment no longer advances
+  the generation; player detach keeps output ownership retryable while releasing its cached frame.
+- Drain request-local encode autoreleases before resolving/rejecting callbacks; validate rounded
+  dimensions before allocation. iOS release and failed-write cleanup use leaf unlink, preserving
+  a directory that replaces the file and its contents.
+- Recover encoder admission if Android worker creation throws; clean up collected display images
+  when continuation fails and tolerate cursor-close failures. Refresh completed foreground-service
+  status probes so `auto` can fall back after the service disappears.
+- Cap outstanding native PixelCopy destinations across captures at 64 million pixels and cap the
+  aggregate SurfaceView destinations before allocating. A timeout does not make a native destination
+  safe to recycle: its lease remains until completion. If native never completes, the budget stays
+  reserved and subsequent requests fail closed. Overlay setup/cleanup is exception-safe with bounded
+  removal retry. This is a destination budget, not a total process-memory or OOM guarantee.
+- Android publication checks cache-directory, pending-file and opened-descriptor device/inode
+  identities around writing and renaming. A controlled cache-directory replacement now rejects
+  instead of publishing replacement bytes, and failed cleanup preserves unrelated replacements.
+  The pending file opens in append mode so an identity mismatch cannot truncate replacement bytes
+  before validation. These checks are not atomic against arbitrary concurrent host filesystem mutations.
+
+Follow-up checks passed: six transpiled-JS groups; 133 filesystem, 11 request, 31 encoder,
+20 display-continuation, eight cursor, 178 PixelCopy/overlay and 48 publication-identity JVM
+checks; 321 Foundation/control-flow/CoreVideo checks; 40 camera-stream and 20 provider native
+checks; and 16 Apple SDK syntax checks. Android legacy and new architecture compilation passed.
+The AV framework behavior in the stream/provider probes is modeled; CoreVideo samples and the
+Foundation filesystem are real. The JVM identity checker models the opened descriptor by a path
+snapshot; production uses Android `fstat`, which has compile coverage here but needs runtime testing.
+
+Physical XR tests also verified the viewport and negative-z regressions. An alpha-loss hypothesis
+was withdrawn: byte-exact old/candidate scaling on UIKit retained transparency in both outputs.
+The bounded probes do not establish every possible failure mode, a natural long-duration onset,
+or absence of leaks. The earlier device results above retain their original source scope.
+
+
+On the final iOS source, full RN new-architecture runs on XR and iOS-on-Mac each passed
+41 API checks, 600 encode/decode/release cycles and three actual runtime reloads during delayed
+writes. All sampled/final owned-cache counts were zero. Each platform also passed 30 AV captures
+and same-process foreground/focus recovery, plus two manually fed camera composite PNGs with
+host delegate/queue restoration. The 66 selected raw images decoded without whole-black output;
+AV regions exceeded 500 distinct colors and camera control/mask samples matched fixture colors
+(XR exact, Mac within 32 per RGB channel). These are bounded, synthetic own-app regressions;
+they do not establish that the reported BRICKS 2.25.11 build is fixed or prove absence of leaks.

@@ -256,9 +256,16 @@ public class ScreenCapturetListenManager {
             e.printStackTrace();
 
         } finally {
-            if (cursor != null && !cursor.isClosed()) {
-                cursor.close();
-            }
+            closeCursor(cursor);
+        }
+    }
+
+    private static void closeCursor(Cursor cursor) {
+        try {
+            if (cursor != null && !cursor.isClosed()) cursor.close();
+        } catch (Exception error) {
+            // Provider cleanup must not escape the observer Looper or replace a query failure.
+            Log.w("ScreenCapture", "Could not close screenshot query", error);
         }
     }
 

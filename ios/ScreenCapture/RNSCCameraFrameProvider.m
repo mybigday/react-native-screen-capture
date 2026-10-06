@@ -14,6 +14,22 @@
 @interface RNSCCameraFrameProvider () <AVCaptureVideoDataOutputSampleBufferDelegate>
 @end
 
+/** Port objects identify the stream; names/device positions can be shared by different inputs. */
+static NSString *RNSCVideoStreamIdentity(AVCaptureConnection *connection)
+{
+    NSMutableArray<NSString *> *ports = [NSMutableArray array];
+    for (AVCaptureInputPort *port in connection.inputPorts)
+    {
+        if ([port.mediaType isEqualToString:AVMediaTypeVideo])
+        {
+            NSString *identity = [NSString stringWithFormat:@"%p", port];
+            if (![ports containsObject:identity]) [ports addObject:identity];
+        }
+    }
+    [ports sortUsingSelector:@selector(compare:)];
+    return [ports componentsJoinedByString:@","];
+}
+
 /**
  * The pre-iOS-17 spelling of videoRotationAngle, in the same degrees so the two paths can be
  * compared the same way. Only the difference between two connections is used, so all that
@@ -35,6 +51,8 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     __weak AVCaptureVideoPreviewLayer *_previewLayer;
     __weak UIView *_targetView;
     __weak AVCaptureSession *_session;
+    NSString *_streamIdentity;
+    BOOL _multiCam;
 
     /** An output we added ourselves and therefore must remove again. */
     AVCaptureVideoDataOutput *_ownedOutput;
@@ -49,7 +67,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     BOOL _attached;
     NSUInteger _presentations;
     NSUInteger _attachmentGeneration;
-    /** Set when the session refused another output, so we stop re-probing it every capture. */
+    /** The last discovery could not obtain an output for this stream. */
     BOOL _attachRefused;
 }
 
@@ -66,7 +84,11 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
         _previewLayer = previewLayer;
         _targetView = targetView;
         _session = session;
-        _identifier = [NSString stringWithFormat:@"camera:%p", session];
+        _streamIdentity = RNSCVideoStreamIdentity(previewLayer.connection);
+        _multiCam = [session isKindOfClass:AVCaptureMultiCamSession.class];
+        // The preview graph can change during construction. Bind identity to the same
+        // session/stream snapshot used for output selection, rather than reading it again.
+        _identifier = [NSString stringWithFormat:@"camera:%p:stream:%@", session, _streamIdentity];
         _queue = dispatch_queue_create("com.fugood.screencapture.camera", DISPATCH_QUEUE_SERIAL);
         _lock = OS_UNFAIR_LOCK_INIT;
     }
@@ -85,22 +107,78 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
 - (CALayer *)mediaLayer { return _previewLayer; }
 - (BOOL)isAlive { return _targetView != nil && _previewLayer != nil && _session != nil; }
 
++ (NSString *)sourceIdentifierForPreview:(AVCaptureVideoPreviewLayer *)preview
+{
+    return [NSString stringWithFormat:@"camera:%p:stream:%@", preview.session,
+                                      RNSCVideoStreamIdentity(preview.connection)];
+}
+
+- (BOOL)matchesPreview:(AVCaptureVideoPreviewLayer *)preview
+{
+    return preview.session != nil && _session == preview.session &&
+           [_identifier isEqualToString:[self.class sourceIdentifierForPreview:preview]];
+}
+
+- (BOOL)matchesConnection:(AVCaptureConnection *)connection
+{
+    // Runs on the host's capture queue too; do not depend on its autorelease drain policy.
+    @autoreleasepool
+    {
+        NSString *identity = RNSCVideoStreamIdentity(connection);
+        if (_streamIdentity.length)
+            return [_streamIdentity isEqualToString:identity];
+        // An unidentified reader is only the inputless/unconnected synthetic fallback.
+        return _session.inputs.count == 0 && identity.length == 0;
+    }
+}
+
+- (BOOL)matchesOutput:(AVCaptureVideoDataOutput *)output
+{
+    if (!output) return NO;
+    if (!_streamIdentity.length)
+    {
+        if (_session.inputs.count) return NO;
+        for (AVCaptureConnection *connection in output.connections)
+            if (RNSCVideoStreamIdentity(connection).length) return NO;
+        return YES;
+    }
+    if (!output.connections.count) return NO;
+    // An output carrying multiple streams cannot have separate delegate wrappers removed
+    // independently. Borrow only an output whose connections all belong to this reader.
+    for (AVCaptureConnection *connection in output.connections)
+        if (![self matchesConnection:connection]) return NO;
+    return YES;
+}
+
+- (BOOL)canCreateOutput
+{
+    if (!_multiCam && _streamIdentity.length) return YES;
+    // MultiCam routing requires explicit host connections. An unidentified ordinary preview
+    // also must not compete with a reader for an identified stream. Only the inputless,
+    // unconnected synthetic fallback may create an output without a stream identity.
+    if (_streamIdentity.length || _session.inputs.count) return NO;
+    for (AVCaptureOutput *output in _session.outputs)
+        for (AVCaptureConnection *connection in output.connections)
+            if (RNSCVideoStreamIdentity(connection).length) return NO;
+    return YES;
+}
+
 - (void)attach
 {
     AVCaptureVideoDataOutput *active = _ownedOutput ?: _borrowedOutput;
     if (_attached && [_session.outputs containsObject:active] &&
-        active.sampleBufferDelegate == self)
+        active.sampleBufferDelegate == self && [self matchesOutput:active])
         return;
     if (_attached || active)
         [self detach];
     _attachRefused = NO;
-    _attachmentGeneration++;
     AVCaptureSession *session = _session;
     if (!session) return;
 
     AVCaptureVideoDataOutput *existing = nil;
     for (AVCaptureOutput *output in session.outputs) {
-        if ([output isKindOfClass:AVCaptureVideoDataOutput.class]) {
+        if ([output isKindOfClass:AVCaptureVideoDataOutput.class] &&
+            [self matchesOutput:(AVCaptureVideoDataOutput *)output]) {
             existing = (AVCaptureVideoDataOutput *)output;
             break;
         }
@@ -116,19 +194,25 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
         _previousDelegate = existing.sampleBufferDelegate;
         _previousQueue = previousQueue;
         _attached = YES;
+        _attachmentGeneration++;
         os_unfair_lock_unlock(&_lock);
         [existing setSampleBufferDelegate:self queue:previousQueue ?: _queue];
         return;
     }
 
+    if (![self canCreateOutput])
+    {
+        _attachRefused = YES;
+        return;
+    }
     AVCaptureVideoDataOutput *output = [[AVCaptureVideoDataOutput alloc] init];
     // Never hold on to more than the one frame we keep below.
     output.alwaysDiscardsLateVideoFrames = YES;
     output.videoSettings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
     };
-    // A session at its output limit will not take another one, and will not start to later in
-    // this session's life. hasFrame stays NO, so no placeholder is installed and the preview
+    // A session at its output limit will not take another one. A later discovery can retry
+    // if configuration changes. hasFrame stays NO, so no placeholder is installed and the preview
     // region falls back to whatever drawViewHierarchyInRect gives -- which dumpHierarchy
     // reports honestly as a matched component with hasFrame=no.
     if (![session canAddOutput:output]) {
@@ -151,7 +235,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
         {
             [session commitConfiguration];
         }
-        if (![session.outputs containsObject:output])
+        if (![session.outputs containsObject:output] || ![self matchesOutput:output])
         {
             [self detach];
             _attachRefused = YES;
@@ -171,6 +255,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     }
     os_unfair_lock_lock(&_lock);
     _attached = YES;
+    _attachmentGeneration++;
     os_unfair_lock_unlock(&_lock);
     [output setSampleBufferDelegate:self queue:_queue];
 }
@@ -209,6 +294,10 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     AVCaptureVideoDataOutput *owned = _ownedOutput;
     id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = _previousDelegate;
     dispatch_queue_t previousQueue = _previousQueue;
+    // Refused attempts have no reader to invalidate. Repeated discovery must keep their
+    // generation stable so capture can deliver its no-frame fallback.
+    if (_attached)
+        _attachmentGeneration++;
     _attached = NO;
 
     CVPixelBufferRef stale = _latest;
@@ -292,7 +381,9 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     // preview but not the buffers. Correct for the difference between the two connections;
     // when they already agree this collapses to the identity.
     AVCaptureConnection *preview = previewLayer.connection;
-    AVCaptureConnection *output = (_ownedOutput ?: _borrowedOutput).connections.firstObject;
+    AVCaptureConnection *output = nil;
+    for (AVCaptureConnection *connection in (_ownedOutput ?: _borrowedOutput).connections)
+        if ([self matchesConnection:connection]) { output = connection; break; }
     if (!preview || !output) return CATransform3DIdentity;
 
     CGFloat angle = 0;
@@ -339,11 +430,13 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
 {
     // Snapshot forwarding before processing; detach cannot replace the host for this callback.
     id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = [self borrowedDelegate];
+    BOOL matchingConnection = [self matchesConnection:connection];
     CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
     CVPixelBufferRef stale = NULL;
     os_unfair_lock_lock(&_lock);
     // Teardown and publication share the lock: a callback cannot retain a frame after detach.
-    if (_attached && (output == _ownedOutput || output == _borrowedOutput) && pixelBuffer)
+    if (_attached && (output == _ownedOutput || output == _borrowedOutput) && pixelBuffer &&
+        matchingConnection)
     {
         stale = _latest;
         _latest = CVPixelBufferRetain(pixelBuffer);
@@ -406,7 +499,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
 - (NSUInteger)attachmentGeneration { return _source.attachmentGeneration; }
 - (BOOL)isAlive
 {
-    return _view.window != nil && [_source matchesSession:_preview.session];
+    return _view.window != nil && [_source matchesPreview:_preview];
 }
 - (void)attach
 {

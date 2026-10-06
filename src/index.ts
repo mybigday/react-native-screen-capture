@@ -107,11 +107,8 @@ const emitter = new NativeEventEmitter(
 
 let defaultMode: CaptureMode = 'auto'
 
-// The accessibility service can only be switched on from system Settings, which means the app
-// was backgrounded in between. Caching the answer keeps a burst of captures from paying a
-// native round-trip each, which would otherwise sit in front of every single frame.
-// The promise, not the resolved value: a burst that starts in one tick would otherwise see a
-// null cache on every call and fire a round-trip each, which is what the cache is here to stop.
+// Share only an outstanding probe. A service can disconnect while the app stays foreground,
+// so a resolved grant cannot stand in for the availability of later captures.
 let accessibilityStatus: Promise<PermissionStatus> | null = null
 AppState.addEventListener('change', (state) => {
   if (state === 'active') {
@@ -124,24 +121,13 @@ async function resolveMode(mode: CaptureMode): Promise<'view' | 'accessibility'>
   if (mode !== 'auto') return mode
   if (Platform.OS !== 'android') return 'view'
   if (accessibilityStatus === null) {
-    accessibilityStatus = (
+    const probe = (
       NativeScreenCapture.getPermissionStatus('accessibility') as Promise<PermissionStatus>
-    ).then(
-      (status) => {
-        // 'denied' also means "enabled, not bound yet", which is what the user sees for a
-        // moment after flipping the toggle and coming back. Caching that would pin `auto` to
-        // `view` for the rest of the foreground session.
-        if (status === 'denied') accessibilityStatus = null
-        return status
-      },
-      () => {
-        // Nor cache a failure. `auto` is the mode a caller picks so they never have to think
-        // about accessibility availability, so a failed probe falls back rather than rejecting
-        // the capture they actually asked for.
-        accessibilityStatus = null
-        return 'denied' as PermissionStatus
-      },
-    )
+    ).catch(() => 'denied' as PermissionStatus)
+    accessibilityStatus = probe
+    void probe.then(() => {
+      if (accessibilityStatus === probe) accessibilityStatus = null
+    })
   }
   return (await accessibilityStatus) === 'granted' ? 'accessibility' : 'view'
 }

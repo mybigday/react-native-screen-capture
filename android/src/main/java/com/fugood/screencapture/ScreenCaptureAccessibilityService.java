@@ -191,41 +191,91 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                                         final int[] displays, final int index,
                                         final List<Bitmap> collected,
                                         final CaptureCallback callback) {
-        if (index >= displays.length) {
-            Bitmap stitched = stitch(collected);
-            if (stitched == null) {
-                callback.onResult(null, "Could not compose the captured displays");
-            } else {
-                callback.onResult(stitched, null);
-            }
-            return;
+        new DisplayCapture(service, displays, collected, callback).capture(index);
+    }
+
+    /** Owns collected frames until the final callback takes ownership of the result. */
+    private static final class DisplayCapture {
+        private final ScreenCaptureAccessibilityService service;
+        private final int[] displays;
+        private final List<Bitmap> collected;
+        private final CaptureCallback callback;
+        private final AtomicBoolean delivered = new AtomicBoolean();
+
+        DisplayCapture(ScreenCaptureAccessibilityService service, int[] displays,
+                       List<Bitmap> collected, CaptureCallback callback) {
+            this.service = service;
+            this.displays = displays;
+            this.collected = collected;
+            this.callback = callback;
         }
-        takeScreenshot(service, displays[index], 1, new CaptureCallback() {
-            @Override
-            public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
-                if (bitmap == null) {
-                    // A secondary display that will not yield is not worth failing the whole
-                    // capture over; the built-in screen still has to come back.
-                    if (displays[index] == Display.DEFAULT_DISPLAY) {
-                        for (Bitmap done : collected) done.recycle();
-                        callback.onResult(null, error);
-                        return;
-                    }
-                } else {
+
+        void capture(final int index) {
+            if (delivered.get()) return;
+            Bitmap output = null;
+            try {
+                if (index >= displays.length) {
+                    output = stitch(collected);
+                    collected.clear();
+                    deliver(output, output == null ? "Could not compose the captured displays" : null);
+                    return;
+                }
+                takeScreenshot(service, displays[index], 1, (bitmap, error) -> accept(index, bitmap, error));
+            } catch (Throwable failure) {
+                // A downstream callback may already have handed the bitmap to the encoder before
+                // throwing. It owns cleanup from that point; never recycle or settle again here.
+                if (delivered.get()) throw failure;
+                recycle(output);
+                fail(String.valueOf(failure.getMessage()));
+            }
+        }
+
+        private void accept(int index, Bitmap bitmap, String error) {
+            if (delivered.get()) {
+                recycle(bitmap);
+                return;
+            }
+            try {
+                if (bitmap == null && displays[index] == Display.DEFAULT_DISPLAY) {
+                    fail(error);
+                    return;
+                }
+                // An unavailable secondary display still allows the other displays to return.
+                if (bitmap != null) {
                     collected.add(bitmap);
                     long pixels = 0;
                     for (Bitmap part : collected)
                         pixels += (long)part.getWidth() * part.getHeight();
                     if (pixels > 64000000) {
-                        for (Bitmap part : collected)
-                            part.recycle();
-                        callback.onResult(null, "Captured displays exceed 64 megapixels");
-                        return;
+                        throw new IllegalArgumentException("Captured displays exceed 64 megapixels");
                     }
                 }
-                captureDisplays(service, displays, index + 1, collected, callback);
+                capture(index + 1);
+            } catch (Throwable failure) {
+                if (delivered.get()) throw failure;
+                // add() can fail before or after adding: isRecycled protects both ownership cases.
+                recycle(bitmap);
+                fail(String.valueOf(failure.getMessage()));
             }
-        });
+        }
+
+        private void fail(String error) {
+            for (Bitmap part : collected) recycle(part);
+            collected.clear();
+            deliver(null, error);
+        }
+
+        private void deliver(Bitmap bitmap, String error) {
+            if (!delivered.compareAndSet(false, true)) {
+                recycle(bitmap);
+                return;
+            }
+            callback.onResult(bitmap, error);
+        }
+
+        private static void recycle(Bitmap bitmap) {
+            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+        }
     }
 
     /** Side by side, left to right, on a canvas as tall as the tallest display. */

@@ -1,4 +1,12 @@
 #import "RNSCFileStore.h"
+#include <errno.h>
+#include <unistd.h>
+
+// Unlike NSFileManager removal, unlink cannot recursively remove a replacement directory.
+static int RNSCUnlinkLeafPath(const char *path)
+{
+    return unlink(path) == 0 ? 0 : errno;
+}
 
 dispatch_queue_t RNSCFileQueue(void)
 {
@@ -85,7 +93,8 @@ dispatch_queue_t RNSCFileQueue(void)
                                                         error:error])
             return path;
     }
-    [_manager removeItemAtPath:path error:NULL];
+    // Best effort only; preserve the write error and never recurse into a replacement directory.
+    (void)RNSCUnlinkLeafPath(path.fileSystemRepresentation);
     return nil;
 }
 
@@ -149,7 +158,23 @@ dispatch_queue_t RNSCFileQueue(void)
                                      }];
         return NO;
     }
-    return [_manager removeItemAtPath:path error:error];
+    int leafError = RNSCUnlinkLeafPath(path.fileSystemRepresentation);
+    if (!leafError) return YES;
+    // A purge or an external consumer can remove the file after its attributes were read.
+    if (leafError == ENOENT) return NO;
+    if (error)
+    {
+        NSError *underlying = [NSError errorWithDomain:NSPOSIXErrorDomain code:leafError
+            userInfo:@{NSFilePathErrorKey: path}];
+        NSInteger code = (leafError == EACCES || leafError == EPERM)
+            ? NSFileWriteNoPermissionError
+            : ((leafError == EISDIR || leafError == ENOTDIR)
+                ? NSFileWriteInvalidFileNameError : NSFileWriteUnknownError);
+        *error = [NSError errorWithDomain:NSCocoaErrorDomain code:code
+            userInfo:@{NSLocalizedDescriptionKey: underlying.localizedDescription,
+                       NSFilePathErrorKey: path, NSUnderlyingErrorKey: underlying}];
+    }
+    return NO;
 }
 
 - (NSUInteger)clear:(NSError **)error

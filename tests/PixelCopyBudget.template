@@ -1,0 +1,394 @@
+package com.fugood.screencapture;
+
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/** Production methods are extracted byte for byte; images are metadata only, never allocated. */
+public final class PixelCopyBudgetTest {
+    @interface Nullable {}
+    static int checks;
+    static void check(boolean condition, String message) {
+        checks++;
+        if (!condition) throw new AssertionError(message);
+    }
+    static final Handler UI = new Handler();
+    static final long SURFACE_COPY_TIMEOUT_MS = 1500, WINDOW_COPY_TIMEOUT_MS = 2000;
+    static class Handler {
+        final List<Runnable> timers = new ArrayList<>();
+        boolean reject;
+        void postDelayed(Runnable run, long delay) {
+            if (reject) throw new AssertionError("injected scheduling failure");
+            timers.add(run);
+        }
+        void removeCallbacks(Runnable run) { timers.removeIf(candidate -> candidate == run); }
+        void expire() { List<Runnable> due = new ArrayList<>(timers); timers.clear(); for (Runnable run : due) run.run(); }
+    }
+    static final class Bitmap {
+        static int allocations;
+        static boolean failAllocation;
+        static int failAllocationAt;
+        static int allocationAttempts;
+        static final List<Bitmap> created = new ArrayList<>();
+        static final class Config { static final Config ARGB_8888 = new Config(); }
+        final int width, height;
+        int recycles;
+        Bitmap(int width, int height) { this.width = width; this.height = height; }
+        static Bitmap createBitmap(int width, int height, Config config) {
+            if (++allocationAttempts == failAllocationAt || failAllocation) throw new AssertionError("injected allocation failure");
+            allocations++;
+            Bitmap bitmap = new Bitmap(width, height); created.add(bitmap); return bitmap;
+        }
+        int getWidth() { return width; }
+        int getHeight() { return height; }
+        boolean isRecycled() { return recycles != 0; }
+        void recycle() { if (++recycles > 1) throw new AssertionError("double recycle"); }
+    }
+    static class Drawable { void setBounds(int left, int top, int right, int bottom) {} }
+    static final class BitmapDrawable extends Drawable {
+        static boolean reject;
+        BitmapDrawable(Object resources, Bitmap bitmap) { if (reject) throw new AssertionError("injected drawable construction"); }
+    }
+    static final class MarkerDrawable extends Drawable { MarkerDrawable(String text) {} }
+    static final class ViewOverlay {
+        final List<Drawable> items = new ArrayList<>();
+        int addFailure, removeFailures, removes;
+        void add(Drawable drawable) {
+            if (addFailure == 1) throw new AssertionError("injected add before insertion");
+            items.add(drawable);
+            if (addFailure == 2) throw new AssertionError("injected add after insertion");
+        }
+        void remove(Drawable drawable) {
+            removes++;
+            if (removeFailures-- > 0) throw new AssertionError("injected removal failure");
+            items.remove(drawable);
+        }
+    }
+    static class View {
+        static final int VISIBLE = 0;
+        final int width, height;
+        final ViewOverlay overlay = new ViewOverlay();
+        View(int width, int height) { this.width = width; this.height = height; }
+        int getWidth() { return width; }
+        int getHeight() { return height; }
+        int getVisibility() { return VISIBLE; }
+        ViewOverlay getOverlay() { return overlay; }
+        Object getResources() { return null; }
+        void draw(Canvas canvas) {}
+    }
+    static class ViewGroup extends View {
+        final List<View> children = new ArrayList<>();
+        ViewGroup(int width, int height, View... children) { super(width, height); this.children.addAll(Arrays.asList(children)); }
+        int getChildCount() { return children.size(); }
+        View getChildAt(int index) { return children.get(index); }
+    }
+    static final class SurfaceView extends View { SurfaceView(int width, int height) { super(width, height); } }
+    static final class Window { final View decor; Window(View decor) { this.decor = decor; } View getDecorView() { return decor; } }
+    static final class Activity { final Window window; Activity(View decor) { window = new Window(decor); } Window getWindow() { return window; } }
+    static final class Rect { Rect(int left, int top, int right, int bottom) {} }
+    static final class Canvas { Canvas(Bitmap bitmap) {} }
+    static final class Build {
+        static final class VERSION { static int SDK_INT = 36; }
+        static final class VERSION_CODES { static final int O = 26; }
+    }
+    static final class CaptureFiles {
+        static void scaledSize(int width, int height, double scale) {
+            if (width <= 0 || height <= 0 || (long) width * height > 64_000_000L) throw new IllegalArgumentException("invalid dimensions");
+        }
+    }
+    interface CaptureCallback { void onResult(Bitmap bitmap, String error); }
+    static final class Sink implements CaptureCallback {
+        int calls; Bitmap bitmap; String error;
+        public void onResult(Bitmap bitmap, String error) { calls++; this.bitmap = bitmap; this.error = error; }
+    }
+    static final class Overlay {
+        final SurfaceView view; final Drawable drawable; final Bitmap bitmap;
+        Overlay(SurfaceView view, Drawable drawable, Bitmap bitmap) { this.view = view; this.drawable = drawable; this.bitmap = bitmap; }
+    }
+    static final class PixelCopy {
+        static final int SUCCESS = 0;
+        interface OnPixelCopyFinishedListener { void onPixelCopyFinished(int result); }
+        static final List<Request> pending = new ArrayList<>();
+        static boolean reject;
+        static int requestAttempts, rejectAt;
+        static final class Request {
+            final Bitmap bitmap; final OnPixelCopyFinishedListener listener;
+            Request(Bitmap bitmap, OnPixelCopyFinishedListener listener) { this.bitmap = bitmap; this.listener = listener; }
+            void deliver(int result) { listener.onPixelCopyFinished(result); }
+        }
+        static void request(Window window, Rect rect, Bitmap bitmap, OnPixelCopyFinishedListener listener, Handler ui) { request(null, bitmap, listener, ui); }
+        static void request(SurfaceView surface, Bitmap bitmap, OnPixelCopyFinishedListener listener, Handler ui) {
+            if (++requestAttempts == rejectAt || reject) throw new AssertionError("injected synchronous rejection");
+            pending.add(new Request(bitmap, listener));
+        }
+    }
+    static void afterNextFrame(View decor, Runnable next) { next.run(); }
+    static int windowStatusBarHeight(Activity activity, View decor) { return 0; }
+    static Bitmap cropTop(Bitmap bitmap, int top) { return bitmap; }
+    static final class Log {
+        static int warnings;
+        static void w(String tag, String message, Throwable error) { warnings++; }
+    }
+    static Sink start(View decor) {
+        Activity activity = new Activity(decor); Sink sink = new Sink(); CaptureCallback callback = once(sink);
+        try { captureOnUiThread(activity, false, false, callback); }
+        catch (Throwable failure) { callback.onResult(null, String.valueOf(failure.getMessage())); }
+        return sink;
+    }
+
+    static void removalCases() {
+        SurfaceView firstView = new SurfaceView(2, 2), secondView = new SurfaceView(2, 2);
+        Drawable firstDrawable = new Drawable(), secondDrawable = new Drawable();
+        firstView.overlay.add(firstDrawable); secondView.overlay.add(secondDrawable);
+        Bitmap firstBitmap = new Bitmap(2, 2), secondBitmap = new Bitmap(2, 2);
+        List<Overlay> overlays = new ArrayList<>(List.of(new Overlay(firstView, firstDrawable, firstBitmap),
+                                                       new Overlay(secondView, secondDrawable, secondBitmap)));
+        firstView.overlay.removeFailures = 1;
+        int beforeWarnings = Log.warnings;
+        Throwable escaped = null;
+        try { removeOverlays(overlays); } catch (Throwable failure) { escaped = failure; }
+        check(escaped == null, "overlay cleanup aborted on first removal failure: " + escaped);
+        check(firstBitmap.recycles == 1 && secondBitmap.recycles == 1 && overlays.isEmpty(), "cleanup skipped owned bitmaps/list clear");
+        check(firstView.overlay.items.isEmpty() && secondView.overlay.items.isEmpty(), "retry failed to remove transiently stuck drawable");
+        check(firstView.overlay.removes == 2 && secondView.overlay.removes == 1 && Log.warnings == beforeWarnings + 1,
+              "cleanup retry/log was not bounded or did not continue other items");
+
+        firstDrawable = new Drawable(); secondDrawable = new Drawable();
+        firstView.overlay.add(firstDrawable); secondView.overlay.add(secondDrawable);
+        firstBitmap = new Bitmap(2, 2); secondBitmap = new Bitmap(2, 2);
+        overlays.add(new Overlay(firstView, firstDrawable, firstBitmap)); overlays.add(new Overlay(secondView, secondDrawable, secondBitmap));
+        firstView.overlay.removeFailures = 100;
+        int beforeRemoves = firstView.overlay.removes;
+        removeOverlays(overlays);
+        check(firstView.overlay.removes == beforeRemoves + 2 && secondView.overlay.items.isEmpty(), "permanently rejected removal retried without bound or skipped next item");
+        check(firstBitmap.recycles == 1 && secondBitmap.recycles == 1 && overlays.isEmpty(), "permanent removal rejection masked remaining cleanup");
+        // A platform which always rejects remove cannot be forced to detach. This fixture is
+        // explicitly cleared only after verifying our bounded best-effort cleanup behavior.
+        firstView.overlay.items.clear();
+    }
+
+    static void installationFailure(int mode, boolean marker) {
+        SurfaceView view = new SurfaceView(4000, 4000);
+        List<Overlay> overlays = new ArrayList<>() {
+            @Override public boolean add(Overlay overlay) {
+                if (mode == 3) throw new AssertionError("injected list add before insertion");
+                boolean result = super.add(overlay);
+                if (mode == 4) throw new AssertionError("injected list add after insertion");
+                return result;
+            }
+        };
+        if (mode <= 2) view.overlay.addFailure = mode;
+        // Exercise rollback even when remove itself fails once after add already inserted.
+        if (mode == 2) view.overlay.removeFailures = 1;
+        int[] done = {0};
+        copySurfaceViews(List.of(view), overlays, marker, () -> done[0]++);
+        PixelCopy.Request request = PixelCopy.pending.remove(0);
+        Throwable escaped = null;
+        try { request.deliver(marker ? 2 : PixelCopy.SUCCESS); } catch (Throwable failure) { escaped = failure; }
+        check(escaped == null && done[0] == 1 && UI.timers.isEmpty(), "install rollback escaped or failed completion, mode " + mode);
+        check(view.overlay.items.isEmpty() && overlays.isEmpty() && request.bitmap.recycles == 1,
+              "install rollback retained drawable/list/bitmap, mode " + mode);
+        request.deliver(marker ? 2 : PixelCopy.SUCCESS);
+        check(done[0] == 1 && request.bitmap.recycles == 1, "duplicate rolled-back callback reclaimed ownership twice");
+    }
+
+    /* PRODUCTION_METHODS */
+
+    public static void main(String[] args) {
+        if (args.length != 0 && args[0].equals("cleanupOnly")) {
+            removalCases();
+            System.out.println("PixelCopyBudgetTest cleanup: " + checks + " checks passed");
+            return;
+        }
+        // Each 16MP request times out while native still owns its destination. A process can
+        // retain at most four such buffers even across captures/reloads, with no actual images.
+        for (int index = 0; index < 12; index++) {
+            Sink sink = start(new View(4000, 4000));
+            UI.expire();
+            check(sink.calls == 1 && sink.bitmap == null, "timeout/rejection must settle once");
+            check(PixelCopy.pending.size() <= 4, "native-owned buffers accumulated past 64MP after timeout");
+        }
+        check(PixelCopy.pending.size() == 4 && Bitmap.allocations == 4, "quota must reject before allocation");
+        for (PixelCopy.Request request : PixelCopy.pending) check(request.bitmap.recycles == 0, "timeout recycled a native-owned destination");
+
+        PixelCopy.Request old = PixelCopy.pending.remove(0);
+        old.deliver(PixelCopy.SUCCESS);
+        check(old.bitmap.recycles == 1, "late result did not recycle after native completion");
+        Sink newer = start(new View(4000, 4000));
+        check(newer.calls == 0 && PixelCopy.pending.size() == 4, "late callback did not restore admission");
+        old.deliver(PixelCopy.SUCCESS);
+        check(newer.calls == 0 && old.bitmap.recycles == 1, "old duplicate settled new capture or recycled twice");
+        PixelCopy.Request current = PixelCopy.pending.remove(3);
+        current.deliver(PixelCopy.SUCCESS);
+        check(newer.calls == 1 && newer.bitmap == current.bitmap && newer.error == null, "new generation was not delivered");
+        current.deliver(PixelCopy.SUCCESS);
+        check(newer.calls == 1 && current.bitmap.recycles == 0, "duplicate callback stole encoder-owned result");
+        current.bitmap.recycle();
+        for (PixelCopy.Request request : PixelCopy.pending) request.deliver(PixelCopy.SUCCESS);
+        PixelCopy.pending.clear();
+        check(UI.timers.isEmpty(), "completion retained deadline timers");
+
+        Bitmap.failAllocation = true;
+        for (int index = 0; index < 6; index++) {
+            Sink failure = start(new View(4000, 4000));
+            check(failure.calls == 1 && failure.error.contains("allocation"), "allocation failure did not release capacity");
+        }
+        Bitmap.failAllocation = false;
+        PixelCopy.reject = true;
+        int allocatedBeforeReject = Bitmap.allocations;
+        for (int index = 0; index < 6; index++) {
+            Sink failure = start(new View(4000, 4000));
+            check(failure.calls == 1 && failure.error.contains("rejection"), "sync Throwable rejection did not restore admission");
+        }
+        PixelCopy.reject = false;
+        check(Bitmap.allocations == allocatedBeforeReject + 6 && UI.timers.isEmpty(), "sync rejection retained deadline");
+        Sink recovered = start(new View(4000, 4000));
+        check(recovered.calls == 0 && PixelCopy.pending.size() == 1, "admission remained closed after failures");
+        current = PixelCopy.pending.remove(0); current.deliver(PixelCopy.SUCCESS); current.bitmap.recycle();
+
+        int beforeAggregate = Bitmap.allocations;
+        Sink oversized = start(new ViewGroup(2, 2, new SurfaceView(8000, 5000), new SurfaceView(8000, 5000)));
+        check(oversized.calls == 1 && oversized.bitmap == null && oversized.error != null,
+              "aggregate oversized surfaces must fail the whole capture");
+        check(Bitmap.allocations == beforeAggregate && PixelCopy.pending.isEmpty() && UI.timers.isEmpty(),
+              "aggregate rejection allocated/requested a partial capture");
+
+        List<Sink> expiredSurfaces = new ArrayList<>();
+        for (int index = 0; index < 12; index++) {
+            Sink sink = start(new ViewGroup(4000, 4000, new SurfaceView(4000, 4000)));
+            UI.expire(); UI.expire();
+            expiredSurfaces.add(sink);
+            check(sink.calls == 1 && sink.bitmap == null, "surface/window timeout did not terminate");
+            check(PixelCopy.pending.size() <= 4, "surface native destinations accumulated past 64MP");
+        }
+        check(PixelCopy.pending.size() == 4, "surface budget did not bound two-stage destinations");
+        for (PixelCopy.Request request : PixelCopy.pending) {
+            check(request.bitmap.recycles == 0, "surface timeout recycled pending native destination");
+            request.deliver(PixelCopy.SUCCESS);
+            request.deliver(PixelCopy.SUCCESS);
+            check(request.bitmap.recycles == 1, "late surface/window result recycle was not exact once");
+        }
+        PixelCopy.pending.clear();
+        for (Sink sink : expiredSurfaces) check(sink.calls == 1, "old callbacks resettled expired generation");
+        check(UI.timers.isEmpty(), "late surfaces queued another window capture");
+
+        SurfaceView firstSurface = new SurfaceView(4000, 4000), secondSurface = new SurfaceView(4000, 4000);
+        Sink surfaces = start(new ViewGroup(2, 2, firstSurface, secondSurface));
+        PixelCopy.Request first = PixelCopy.pending.get(0), second = PixelCopy.pending.get(1);
+        first.deliver(PixelCopy.SUCCESS); first.deliver(PixelCopy.SUCCESS);
+        check(first.bitmap.recycles == 0 && firstSurface.overlay.items.size() == 1,
+              "duplicate stole surface overlay-owned bitmap");
+        check(PixelCopy.pending.size() == 2 && surfaces.calls == 0, "duplicate surface callback decremented pending twice");
+        second.deliver(PixelCopy.SUCCESS);
+        check(PixelCopy.pending.size() == 3, "healthy surfaces did not reach one window copy");
+        current = PixelCopy.pending.get(2); current.deliver(PixelCopy.SUCCESS);
+        check(surfaces.calls == 1 && first.bitmap.recycles == 1 && second.bitmap.recycles == 1,
+              "surface overlays not reclaimed once after window capture");
+        first.deliver(PixelCopy.SUCCESS); second.deliver(PixelCopy.SUCCESS); current.deliver(PixelCopy.SUCCESS);
+        check(surfaces.calls == 1 && current.bitmap.recycles == 0 && firstSurface.overlay.items.isEmpty(),
+              "post-completion duplicate recycled output or reinstalled overlay");
+        current.bitmap.recycle(); PixelCopy.pending.clear();
+
+        // A failed all-or-nothing reservation must return earlier leases in the same batch.
+        Sink held = start(new View(4000, 4000));
+        beforeAggregate = Bitmap.allocations;
+        Sink partial = start(new ViewGroup(2, 2, new SurfaceView(8000, 4000), new SurfaceView(8000, 4000)));
+        check(partial.calls == 1 && partial.error.contains("pending"), "partial reservation did not reject capture");
+        check(Bitmap.allocations == beforeAggregate && PixelCopy.pending.size() == 1, "reservation failure submitted a partial batch");
+        Sink remaining = start(new View(8000, 6000));
+        check(remaining.calls == 0 && PixelCopy.pending.size() == 2, "partial reservation leaked capacity");
+        for (PixelCopy.Request request : PixelCopy.pending) { request.deliver(PixelCopy.SUCCESS); request.bitmap.recycle(); }
+        PixelCopy.pending.clear();
+
+        Bitmap.failAllocation = true;
+        for (int index = 0; index < 6; index++) {
+            Sink failure = start(new ViewGroup(2, 2, new SurfaceView(8000, 4000), new SurfaceView(8000, 4000)));
+            check(failure.calls == 1 && failure.error.contains("allocation"), "surface allocation failure leaked reserved batch");
+        }
+        Bitmap.failAllocation = false; PixelCopy.reject = true;
+        for (int index = 0; index < 6; index++) {
+            Sink failure = start(new ViewGroup(2, 2, new SurfaceView(8000, 4000), new SurfaceView(8000, 4000)));
+            check(failure.calls == 1 && failure.error.contains("rejection"), "surface sync rejection leaked reserved batch");
+        }
+        PixelCopy.reject = false;
+        check(UI.timers.isEmpty() && PixelCopy.pending.isEmpty(), "failed surfaces retained timer/request");
+        Sink empty = start(new ViewGroup(2, 2, new SurfaceView(0, 8), new SurfaceView(8, 0)));
+        check(empty.calls == 0 && PixelCopy.pending.size() == 1, "empty surfaces were not skipped safely");
+        current = PixelCopy.pending.remove(0); current.deliver(PixelCopy.SUCCESS); current.bitmap.recycle();
+        beforeAggregate = Bitmap.allocations;
+        Sink huge = start(new ViewGroup(2, 2, new SurfaceView(Integer.MAX_VALUE, Integer.MAX_VALUE)));
+        check(huge.calls == 1 && huge.error != null && Bitmap.allocations == beforeAggregate,
+              "int-product overflow escaped the surface limit");
+        Sink healthy = start(new View(8000, 8000));
+        check(healthy.calls == 0 && PixelCopy.pending.size() == 1, "64MP boundary did not recover after all failures");
+        beforeAggregate = Bitmap.allocations;
+        Sink excess = start(new View(1, 1));
+        check(excess.calls == 1 && excess.error.contains("pending") && Bitmap.allocations == beforeAggregate,
+              "duplicate callback returned budget twice or 64MP boundary overflowed");
+        current = PixelCopy.pending.remove(0); current.deliver(PixelCopy.SUCCESS); current.bitmap.recycle();
+        check(UI.timers.isEmpty(), "final completion retained deadline");
+
+        UI.reject = true;
+        for (int index = 0; index < 6; index++) {
+            Sink windowSchedule = start(new View(8000, 8000));
+            check(windowSchedule.calls == 1 && windowSchedule.error.contains("scheduling"), "window scheduling failure retained lease");
+            Sink surfaceSchedule = start(new ViewGroup(2, 2, new SurfaceView(8000, 4000), new SurfaceView(8000, 4000)));
+            check(surfaceSchedule.calls == 1 && surfaceSchedule.error.contains("scheduling"), "surface scheduling failure retained batch");
+        }
+        UI.reject = false;
+        Sink finalSuccess = start(new View(8000, 8000));
+        check(finalSuccess.calls == 0 && PixelCopy.pending.size() == 1, "scheduling failures did not restore full capacity");
+        current = PixelCopy.pending.remove(0); current.deliver(2); current.deliver(2);
+        check(finalSuccess.calls == 1 && finalSuccess.error.contains("code 2") && current.bitmap.recycles == 1,
+              "native failure result did not recycle/settle once");
+
+        BitmapDrawable.reject = true;
+        SurfaceView failedSurface = new SurfaceView(8000, 8000);
+        List<Overlay> rolledBack = new ArrayList<>();
+        int[] completions = {0};
+        copySurfaceViews(List.of(failedSurface), rolledBack, false, () -> completions[0]++);
+        current = PixelCopy.pending.remove(0);
+        Throwable escaped = null;
+        try { current.deliver(PixelCopy.SUCCESS); } catch (Throwable failure) { escaped = failure; }
+        BitmapDrawable.reject = false;
+        check(escaped == null, "drawable construction failure escaped native callback: " + escaped);
+        check(current.bitmap.recycles == 1 && completions[0] == 1 && rolledBack.isEmpty() && UI.timers.isEmpty(),
+              "construction failure retained bitmap/timer or skipped completion");
+        for (int mode = 1; mode <= 4; mode++) {
+            installationFailure(mode, false);
+            installationFailure(mode, true);
+        }
+        removalCases();
+
+        // Bitmap allocation or native rejection of only the first member must release that
+        // reservation while later members continue. A 64MP window then proves no lease leaked.
+        for (int mode = 0; mode < 2; mode++) {
+            int createdBefore = Bitmap.created.size();
+            if (mode == 0) Bitmap.failAllocationAt = Bitmap.allocationAttempts + 1;
+            else PixelCopy.rejectAt = PixelCopy.requestAttempts + 1;
+            Sink partialFailure = start(new ViewGroup(8000, 8000, new SurfaceView(8000, 4000), new SurfaceView(8000, 4000)));
+            check(partialFailure.calls == 0 && PixelCopy.pending.size() == 1, "partial failure did not submit remaining surface");
+            if (mode == 1) check(Bitmap.created.get(createdBefore).recycles == 1, "sync rejection retained allocated destination");
+            PixelCopy.pending.remove(0).deliver(PixelCopy.SUCCESS);
+            check(partialFailure.calls == 0 && PixelCopy.pending.size() == 1, "failed first surface lease prevented 64MP window admission");
+            current = PixelCopy.pending.remove(0); current.deliver(PixelCopy.SUCCESS);
+            check(partialFailure.calls == 1 && partialFailure.bitmap == current.bitmap && UI.timers.isEmpty(), "partial failure did not finish capture once");
+            current.bitmap.recycle();
+        }
+
+        // Cleanup diagnostics must not replace the primary PixelCopy error or swallow delivery.
+        SurfaceView cleanupView = new SurfaceView(2, 2);
+        Drawable cleanupDrawable = new Drawable(); cleanupView.overlay.add(cleanupDrawable);
+        cleanupView.overlay.removeFailures = 1;
+        Bitmap cleanupBitmap = new Bitmap(2, 2);
+        List<Overlay> cleanupOverlays = new ArrayList<>(List.of(new Overlay(cleanupView, cleanupDrawable, cleanupBitmap)));
+        Activity activity = new Activity(new View(2, 2)); Sink primary = new Sink();
+        captureWindow(activity, activity.window, activity.window.decor, false, cleanupOverlays, once(primary));
+        current = PixelCopy.pending.remove(0); current.deliver(3);
+        check(primary.calls == 1 && primary.error.equals("PixelCopy failed with code 3") && primary.bitmap == null,
+              "cleanup failure masked primary capture error or prevented settlement");
+        check(cleanupBitmap.recycles == 1 && current.bitmap.recycles == 1 && cleanupView.overlay.items.isEmpty(),
+              "cleanup failure retained primary/overlay bitmap");
+        System.out.println("PixelCopyBudgetTest: " + checks + " checks passed");
+    }
+}

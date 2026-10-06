@@ -14,6 +14,7 @@ import android.text.TextPaint;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.PixelCopy;
 import android.view.SurfaceView;
 import android.view.TextureView;
@@ -187,12 +188,25 @@ final class WindowCapture {
         // The framework can also accept a request and then drop it -- a surface destroyed
         // mid-capture, for instance -- without ever calling the listener. Without a deadline
         // that would hang the capture forever with frozen overlays left on screen.
-        UI.postDelayed(finish, SURFACE_COPY_TIMEOUT_MS);
+        // Reserve after constructing the bookkeeping, before allocating/submitting any bitmap.
+        // An oversized aggregate or exhausted process budget fails the whole capture.
+        // A native request which never calls back keeps its lease across captures. Exhaustion
+        // fails closed: a deadline cannot make a destination safe to recycle or reuse.
+        final PixelCopyBudget.Lease[] leases = reserveSurfaceCopies(views);
+        try {
+            UI.postDelayed(finish, SURFACE_COPY_TIMEOUT_MS);
+        } catch (Throwable failure) {
+            for (PixelCopyBudget.Lease lease : leases) if (lease != null) lease.release();
+            throw failure;
+        }
 
-        for (final SurfaceView view : views) {
+        for (int index = 0; index < views.size(); index++) {
+            final SurfaceView view = views.get(index);
+            final PixelCopyBudget.Lease lease = leases[index];
             final int width = view.getWidth();
             final int height = view.getHeight();
             if (width <= 0 || height <= 0) {
+                if (lease != null) lease.release();
                 countDown.run();
                 continue;
             }
@@ -206,35 +220,78 @@ final class WindowCapture {
                 PixelCopy.request(view, bitmap, new PixelCopy.OnPixelCopyFinishedListener() {
                     @Override
                     public void onPixelCopyFinished(int copyResult) {
-                        // A copy that lands after the deadline below must not install an overlay
-                        // nobody is going to remove.
-                        if (copyResult != PixelCopy.SUCCESS || finished.get()) {
-                            // Secure or DRM-protected surfaces land here; without marking the
-                            // hole just stays transparent.
-                            bitmap.recycle();
-                            if (markUnsupported && !finished.get()) {
-                                Drawable marker = new MarkerDrawable(
-                                    "Protected surface - not capturable");
-                                marker.setBounds(0, 0, width, height);
-                                view.getOverlay().add(marker);
-                                overlays.add(new Overlay(view, marker, null));
+                        if (!lease.release()) return;
+                        Overlay overlay = null;
+                        try {
+                            // A late result must not install an overlay nobody will remove.
+                            if (copyResult != PixelCopy.SUCCESS || finished.get()) {
+                                recycleBitmap(bitmap);
+                                if (markUnsupported && !finished.get()) {
+                                    Drawable marker = new MarkerDrawable(
+                                        "Protected surface - not capturable");
+                                    marker.setBounds(0, 0, width, height);
+                                    overlay = new Overlay(view, marker, null);
+                                }
+                            } else {
+                                BitmapDrawable drawable = new BitmapDrawable(view.getResources(), bitmap);
+                                drawable.setBounds(0, 0, width, height);
+                                overlay = new Overlay(view, drawable, bitmap);
                             }
-                        } else {
-                            BitmapDrawable drawable = new BitmapDrawable(view.getResources(), bitmap);
-                            drawable.setBounds(0, 0, width, height);
-                            view.getOverlay().add(drawable);
-                            overlays.add(new Overlay(view, drawable, bitmap));
+                            if (overlay != null) {
+                                // Track before installation, including add() throwing after it
+                                // has mutated either collection. Rollback removes both identities.
+                                overlays.add(overlay);
+                                view.getOverlay().add(overlay.drawable);
+                            }
+                        } catch (Throwable failure) {
+                            if (overlay != null) {
+                                removeOverlay(overlay);
+                                try {
+                                    overlays.remove(overlay);
+                                } catch (Throwable cleanupFailure) {
+                                    Log.w("ScreenCapture", "Could not untrack capture overlay", cleanupFailure);
+                                }
+                            }
+                            recycleBitmap(bitmap);
+                            Log.w("ScreenCapture", "Could not install capture overlay", failure);
+                        } finally {
+                            countDown.run();
                         }
-                        countDown.run();
                     }
                 }, UI);
             } catch (Throwable t) {
+                if (!lease.release()) throw t;
                 // Surface not created yet, or the allocation failed. Either way this view has to
                 // count down: otherwise the window is never read back and the overlays installed
                 // so far are never removed.
                 if (allocated != null) allocated.recycle();
                 countDown.run();
             }
+        }
+    }
+
+    private static PixelCopyBudget.Lease[] reserveSurfaceCopies(final List<SurfaceView> views) {
+        long total = 0;
+        for (SurfaceView view : views) {
+            int width = view.getWidth(), height = view.getHeight();
+            if (width <= 0 || height <= 0) continue;
+            long pixels = PixelCopyBudget.pixels(width, height);
+            if (pixels > PixelCopyBudget.MAX_PIXELS - total) {
+                throw new IllegalArgumentException("SurfaceView aggregate exceeds the pixel limit");
+            }
+            total += pixels;
+        }
+        PixelCopyBudget.Lease[] leases = new PixelCopyBudget.Lease[views.size()];
+        try {
+            for (int index = 0; index < views.size(); index++) {
+                SurfaceView view = views.get(index);
+                int width = view.getWidth(), height = view.getHeight();
+                if (width > 0 && height > 0) leases[index] = PixelCopyBudget.acquire(width, height);
+            }
+            return leases;
+        } catch (Throwable failure) {
+            for (PixelCopyBudget.Lease lease : leases) if (lease != null) lease.release();
+            throw failure;
         }
     }
 
@@ -307,24 +364,40 @@ final class WindowCapture {
         final int outHeight = height - top;
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            CaptureFiles.scaledSize(width, outHeight, 1);
-            final Bitmap out = Bitmap.createBitmap(width, outHeight, Bitmap.Config.ARGB_8888);
+            final PixelCopyBudget.Lease lease = PixelCopyBudget.acquire(width, outHeight);
+            final Bitmap out;
+            Bitmap allocated = null;
+            final Runnable deadline;
             // Same hazard as the two hops before it: a window whose surface is destroyed
             // between the request and the copy leaves the listener uncalled, and this listener
             // is the only thing that takes the overlays back off the SurfaceViews. Without a
             // deadline the user is left looking at frozen stills over live video.
-            final Runnable deadline = new Runnable() {
-                @Override
-                public void run() {
-                    removeOverlays(overlays);
-                    callback.onResult(null, "PixelCopy did not report a result in time");
-                }
-            };
             try {
+                allocated = Bitmap.createBitmap(width, outHeight, Bitmap.Config.ARGB_8888);
+                out = allocated;
+                deadline = new Runnable() {
+                    @Override
+                    public void run() {
+                        removeOverlays(overlays);
+                        callback.onResult(null, "PixelCopy did not report a result in time");
+                    }
+                };
+            } catch (Throwable failure) {
+                lease.release();
+                if (allocated != null) allocated.recycle();
+                throw failure;
+            }
+            try {
+                // Schedule before native submission so a scheduling failure cannot orphan a
+                // native-owned destination. The deadline deliberately keeps its lease alive.
+                UI.postDelayed(deadline, WINDOW_COPY_TIMEOUT_MS);
                 PixelCopy.request(window, new Rect(0, top, width, height), out,
                     new PixelCopy.OnPixelCopyFinishedListener() {
                         @Override
                         public void onPixelCopyFinished(int copyResult) {
+                            // Claim completion before transferring bitmap ownership. A duplicate
+                            // callback must not recycle an overlay/encoder-owned result.
+                            if (!lease.release()) return;
                             UI.removeCallbacks(deadline);
                             removeOverlays(overlays);
                             // A copy that lands after the deadline settles through once(),
@@ -337,8 +410,8 @@ final class WindowCapture {
                             }
                         }
                     }, UI);
-                UI.postDelayed(deadline, WINDOW_COPY_TIMEOUT_MS);
-            } catch (IllegalArgumentException e) {
+            } catch (Throwable e) {
+                if (!lease.release()) throw e;
                 UI.removeCallbacks(deadline);
                 removeOverlays(overlays);
                 out.recycle();
@@ -369,11 +442,33 @@ final class WindowCapture {
     }
 
     private static void removeOverlays(final List<Overlay> overlays) {
-        for (Overlay overlay : overlays) {
-            overlay.view.getOverlay().remove(overlay.drawable);
-            if (overlay.bitmap != null) overlay.bitmap.recycle();
-        }
+        for (int index = 0; index < overlays.size(); index++) removeOverlay(overlays.get(index));
         overlays.clear();
+    }
+
+    private static void removeOverlay(final Overlay overlay) {
+        try {
+            overlay.view.getOverlay().remove(overlay.drawable);
+        } catch (Throwable failure) {
+            Log.w("ScreenCapture", "Could not remove capture overlay", failure);
+            // A transient removal failure must not leave a drawable behind. Retry at most once;
+            // cleanup must still finish and settle if the platform keeps rejecting removal.
+            try {
+                overlay.view.getOverlay().remove(overlay.drawable);
+            } catch (Throwable retryFailure) {
+                Log.w("ScreenCapture", "Could not remove capture overlay on retry", retryFailure);
+            }
+        } finally {
+            recycleBitmap(overlay.bitmap);
+        }
+    }
+
+    private static void recycleBitmap(@Nullable final Bitmap bitmap) {
+        try {
+            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+        } catch (Throwable failure) {
+            Log.w("ScreenCapture", "Could not recycle capture bitmap", failure);
+        }
     }
 
     private static void collectSurfaceViews(final View view, final List<SurfaceView> out) {

@@ -114,17 +114,22 @@
 
 - (void)detach
 {
-    if (!_attached) return;
-    _attached = NO;
-
-    [self detachOutputFromObservedItem];
-    _output = nil;
-
-    os_unfair_lock_lock(&_lock);
-    CVPixelBufferRef stale = _latest;
-    _latest = NULL;
-    os_unfair_lock_unlock(&_lock);
-    if (stale) CVPixelBufferRelease(stale);
+    if (!_attached && !_output) return;
+    @try
+    {
+        // Preserve ownership and retryability if AVFoundation refuses removal.
+        [self detachOutputFromObservedItem];
+        _output = nil;
+        _attached = NO;
+    }
+    @finally
+    {
+        os_unfair_lock_lock(&_lock);
+        CVPixelBufferRef stale = _latest;
+        _latest = NULL;
+        os_unfair_lock_unlock(&_lock);
+        if (stale) CVPixelBufferRelease(stale);
+    }
 }
 
 - (BOOL)hasFrame

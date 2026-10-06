@@ -7,11 +7,27 @@
 #import "RNSCFileStore.h"
 #import "RNSCProviderRegistry.h"
 #import "RNSCWindowCapture.h"
+#include <limits.h>
 #import <math.h>
 
 #import <UIKit/UIKit.h>
 
 static BOOL RNSCCaptureInFlight;
+
+// Validate the actual rounded/clamped allocation, not its fractional precursor.
+static BOOL RNSCScaledPixelDimensions(double width, double height, double scale,
+                                     double *pixelWidth, double *pixelHeight)
+{
+    if (!isfinite(width) || !isfinite(height) || width <= 0 || height <= 0 ||
+        !isfinite(scale) || scale <= 0) return NO;
+    width = fmax(1.0, round(width * scale));
+    height = fmax(1.0, round(height * scale));
+    if (!isfinite(width) || !isfinite(height) || width > INT_MAX || height > INT_MAX ||
+        width * height > 64000000) return NO;
+    *pixelWidth = width;
+    *pixelHeight = height;
+    return YES;
+}
 
 static NSError *RNSCExceptionError(NSException *exception)
 {
@@ -169,78 +185,81 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
     NSMutableDictionary *result = nil;
     NSError *failure = nil;
     NSString *path = nil;
-    @try {
-        if ([self isInvalidated])
-            [NSException raise:@"CaptureCancelled" format:@"Module is shutting down"];
-        UIImage *output = scale != 1.0 ? [self scaleImage:image by:scale] : image;
-        BOOL isJPEG = [extension isEqualToString:@"jpg"] || [extension isEqualToString:@"jpeg"];
-        NSData *data = isJPEG ? UIImageJPEGRepresentation(output, MAX(0.0, MIN(1.0, quality / 100.0)))
-                              : UIImagePNGRepresentation(output);
-        if (!data.length)
-        {
+    @autoreleasepool
+    {
+        @try {
+            if ([self isInvalidated])
+                [NSException raise:@"CaptureCancelled" format:@"Module is shutting down"];
+            UIImage *output = scale != 1.0 ? [self scaleImage:image by:scale] : image;
+            BOOL isJPEG = [extension isEqualToString:@"jpg"] || [extension isEqualToString:@"jpeg"];
+            NSData *data = isJPEG ? UIImageJPEGRepresentation(output, MAX(0.0, MIN(1.0, quality / 100.0)))
+                                  : UIImagePNGRepresentation(output);
+            if (!data.length)
+            {
+                failure = [NSError
+                    errorWithDomain:@"com.fugood.screencapture"
+                               code:500
+                           userInfo:@{NSLocalizedDescriptionKey : @"Could not encode the image"}];
+            }
+            else
+            {
+                // Construct metadata before publishing: a base64/allocation failure cannot orphan a
+                // file.
+                result = [NSMutableDictionary dictionary];
+                CGImageRef cgImage = output.CGImage;
+                result[@"width"] =
+                    @(cgImage ? CGImageGetWidth(cgImage) : lround(output.size.width * output.scale));
+                result[@"height"] =
+                    @(cgImage ? CGImageGetHeight(cgImage) : lround(output.size.height * output.scale));
+                if (includeBase64)
+                    result[@"base64"] = [data base64EncodedStringWithOptions:0];
+                path = [[RNSCFileStore defaultStore] writeData:data
+                                                     extension:isJPEG ? @"jpg" : @"png"
+                                                         error:&failure];
+                if (path)
+                    result[@"uri"] = [NSURL fileURLWithPath:path].absoluteString;
+                else
+                    result = nil;
+                if ([self isInvalidated])
+                    [NSException raise:@"CaptureCancelled" format:@"Module is shutting down"];
+            }
+        } @catch (NSException *exception) {
+            result = nil;
             failure = [NSError
                 errorWithDomain:@"com.fugood.screencapture"
                            code:500
-                       userInfo:@{NSLocalizedDescriptionKey : @"Could not encode the image"}];
+                       userInfo:@{NSLocalizedDescriptionKey : exception.reason ?: @"Capture failed"}];
         }
-        else
+        @try
         {
-            // Construct metadata before publishing: a base64/allocation failure cannot orphan a
-            // file.
-            result = [NSMutableDictionary dictionary];
-            CGImageRef cgImage = output.CGImage;
-            result[@"width"] =
-                @(cgImage ? CGImageGetWidth(cgImage) : lround(output.size.width * output.scale));
-            result[@"height"] =
-                @(cgImage ? CGImageGetHeight(cgImage) : lround(output.size.height * output.scale));
-            if (includeBase64)
-                result[@"base64"] = [data base64EncodedStringWithOptions:0];
-            path = [[RNSCFileStore defaultStore] writeData:data
-                                                 extension:isJPEG ? @"jpg" : @"png"
-                                                     error:&failure];
-            if (path)
-                result[@"uri"] = [NSURL fileURLWithPath:path].absoluteString;
-            else
-                result = nil;
-            if ([self isInvalidated])
-                [NSException raise:@"CaptureCancelled" format:@"Module is shutting down"];
+            if (!result && path)
+            {
+                NSError *cleanupError = nil;
+                @try
+                {
+                    [[RNSCFileStore defaultStore] releaseURI:[NSURL fileURLWithPath:path].absoluteString
+                                                       error:&cleanupError];
+                }
+                @catch (NSException *exception)
+                {
+                    cleanupError = RNSCExceptionError(exception);
+                }
+                if (cleanupError)
+                    failure =
+                        [NSError errorWithDomain:failure.domain
+                                            code:failure.code
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey : failure.localizedDescription,
+                                            NSUnderlyingErrorKey : cleanupError
+                                        }];
+            }
         }
-    } @catch (NSException *exception) {
-        result = nil;
-        failure = [NSError
-            errorWithDomain:@"com.fugood.screencapture"
-                       code:500
-                   userInfo:@{NSLocalizedDescriptionKey : exception.reason ?: @"Capture failed"}];
-    }
-    @try
-    {
-        if (!result && path)
+        @finally
         {
-            NSError *cleanupError = nil;
-            @try
-            {
-                [[RNSCFileStore defaultStore] releaseURI:[NSURL fileURLWithPath:path].absoluteString
-                                                   error:&cleanupError];
-            }
-            @catch (NSException *exception)
-            {
-                cleanupError = RNSCExceptionError(exception);
-            }
-            if (cleanupError)
-                failure =
-                    [NSError errorWithDomain:failure.domain
-                                        code:failure.code
-                                    userInfo:@{
-                                        NSLocalizedDescriptionKey : failure.localizedDescription,
-                                        NSUnderlyingErrorKey : cleanupError
-                                    }];
+            [self finishCapture];
         }
     }
-    @finally
-    {
-        [self finishCapture];
-    }
-    // Settlement is outside the try: a callback throw must never cause a second settlement.
+    // Drain request temporaries before a callback can throw; settlement never retries.
     if (result)
         resolve(result);
     else
@@ -267,16 +286,14 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
 
 - (UIImage *)scaleImage:(UIImage *)image by:(CGFloat)scale
 {
-    double width = image.size.width * image.scale * scale;
-    double height = image.size.height * image.scale * scale;
-    // Cap derived allocations at 64 megapixels (~256 MiB at 8-bit RGBA).
-    if (!isfinite(width) || !isfinite(height) || width * height > 64000000 || width > INT_MAX ||
-        height > INT_MAX)
+    double width = 0, height = 0;
+    // Cap the actual derived pixel dimensions at 64 megapixels.
+    if (!RNSCScaledPixelDimensions(image.size.width * image.scale,
+                                   image.size.height * image.scale, scale, &width, &height))
     {
         [NSException raise:@"CaptureDimensions" format:@"Scaled capture exceeds 64 megapixels"];
     }
-    CGSize size =
-        CGSizeMake(MAX(1, round(width)) / image.scale, MAX(1, round(height)) / image.scale);
+    CGSize size = CGSizeMake(width / image.scale, height / image.scale);
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
     format.opaque = YES;
     format.scale = image.scale;

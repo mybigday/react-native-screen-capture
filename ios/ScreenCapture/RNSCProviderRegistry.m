@@ -262,13 +262,15 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
                 if (!preview.session) return;
                 NSString *identifier = [NSString
                     stringWithFormat:@"camera:%p:view:%p:layer:%p", preview.session, view, preview];
-                NSString *sourceKey = [NSString stringWithFormat:@"camera:%p", preview.session];
+                NSString *sourceKey = [RNSCCameraFrameProvider sourceIdentifierForPreview:preview];
                 RNSCCameraFrameProvider *source = [self->_cameraSources objectForKey:sourceKey];
-                if (!source || ![source matchesSession:preview.session])
+                if (!source || ![source matchesPreview:preview])
                 {
                     source = [[RNSCCameraFrameProvider alloc] initWithPreviewLayer:preview
                                                                         targetView:view];
-                    [self->_cameraSources setObject:source forKey:sourceKey];
+                    if (!source) return;
+                    // Construction may observe a newer connection than discovery did.
+                    [self->_cameraSources setObject:source forKey:source.identifier];
                 }
                 [self addProviderWithIdentifier:identifier
                                            into:found

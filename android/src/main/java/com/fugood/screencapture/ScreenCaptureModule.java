@@ -19,9 +19,9 @@ import com.facebook.react.modules.core.DeviceEventManagerModule;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -38,19 +38,26 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
 
     private final ReactApplicationContext reactContext;
     // Shared ordering includes publication, promise settlement, and cleanup across bridge reloads.
-    private static final ExecutorService encoder =
-        new ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<>(),
-                               work -> new Thread(work, "rn-screen-capture-encoder"));
+    private static final ThreadPoolExecutor encoder =
+        createEncoder(work -> new Thread(work, "rn-screen-capture-encoder"));
     private final ScreenshotDetector detector;
     private static final AtomicBoolean captureInFlight = new AtomicBoolean();
     private volatile boolean invalidated;
     private final CaptureFiles files;
 
+    private static ThreadPoolExecutor createEncoder(ThreadFactory factory) {
+        // Accept the first task as worker-owned work instead of queuing it before worker creation.
+        ThreadPoolExecutor pool =
+            new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), factory);
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
+
     public ScreenCaptureModule(ReactApplicationContext reactContext) {
         super(reactContext);
         this.reactContext = reactContext;
         this.detector = new ScreenshotDetector(reactContext);
-        this.files = new CaptureFiles(reactContext.getCacheDir());
+        this.files = new CaptureFiles(reactContext.getCacheDir(), new AndroidCaptureFileIdentity());
     }
 
     @Override
@@ -247,15 +254,25 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                 }
             }
         };
+        submitEncode(source, work, promise);
+    }
+
+    private void submitEncode(final Bitmap source, final Runnable work, final Promise promise) {
+        final AtomicBoolean claimed = new AtomicBoolean();
+        final Runnable guarded = () -> {
+            if (claimed.compareAndSet(false, true)) work.run();
+        };
         try {
-            encoder.execute(work);
-        } catch (RejectedExecutionException e) {
-            // Executor submission can fail before work starts. Without this the rejection would
-            // escape into the accessibility service's unguarded callback and the Promise would
-            // never settle.
+            encoder.execute(guarded);
+        } catch (Throwable error) {
+            // Worker creation can fail after queue admission. Cancel before removing the wrapper:
+            // a concurrent worker may already have taken it, but cannot run cancelled image work.
+            // A worker that claimed it first owns bitmap cleanup and promise settlement instead.
+            if (!claimed.compareAndSet(false, true)) return;
+            encoder.remove(guarded);
             source.recycle();
             captureInFlight.set(false);
-            promise.reject(E_CAPTURE, "Module is shutting down", e);
+            promise.reject(E_CAPTURE, "Could not start image encoder", error);
         }
     }
 

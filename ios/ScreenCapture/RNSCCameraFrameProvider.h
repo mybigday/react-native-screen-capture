@@ -25,6 +25,8 @@ NS_ASSUME_NONNULL_BEGIN
                                    targetView:(UIView *)targetView NS_DESIGNATED_INITIALIZER;
 
 - (BOOL)matchesSession:(AVCaptureSession *)session;
++ (NSString *)sourceIdentifierForPreview:(AVCaptureVideoPreviewLayer *)preview;
+- (BOOL)matchesPreview:(AVCaptureVideoPreviewLayer *)preview;
 - (void)retainPresentation;
 - (void)releasePresentation;
 - (void)releasePresentationIfIdle;
@@ -33,7 +35,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-/** Multiple preview layers share one session reader without nesting host delegate wrappers. */
+/** Preview layers of the same input stream share a reader without nesting delegate wrappers. */
 @interface RNSCCameraPresentation : NSObject <RNSCFrameProvider>
 - (instancetype)initWithSource:(RNSCCameraFrameProvider *)source
                        preview:(AVCaptureVideoPreviewLayer *)preview

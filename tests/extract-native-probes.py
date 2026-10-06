@@ -11,7 +11,8 @@ def method(source, start, end):
     return source[source.index(start):source.index(end, source.index(start))]
 excerpts = {
     'EncodeCurrent.inc': method(module, '- (void)encodeImage:', '\n- (BOOL)isInvalidated'),
-    'SerialCurrent.inc': method(window, '+ (void)performSerially:', '+ (void)captureNowExcludingStatusBar:'),
+    'SerialCurrent.inc': method(window, '+ (void)performSerially:', '+ (UIWindow *)primaryWindowForWindows:'),
+    'PrimaryCurrent.inc': method(window, '+ (UIWindow *)primaryWindowForWindows:', '+ (void)captureNowExcludingStatusBar:'),
     'WaitCurrent.inc': method(window, '+ (NSHashTable<id<RNSCFrameProvider>> *)hopelessProviders', '+ (nullable UIImage *)renderWindows:'),
 }
 for name in ['Player', 'Camera', 'SampleBuffer']:

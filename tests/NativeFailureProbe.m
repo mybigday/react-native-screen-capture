@@ -5,6 +5,7 @@
 #import <os/lock.h>
 #import "RNSCFileStore.h"
 #import <math.h>
+#include <sys/stat.h>
 
 // Foundation execution of byte-exact production methods; these are codec/React stubs,
 // not a UIKit screenshot or RN bridge/device test. Filesystem operations are real and small.
@@ -12,6 +13,8 @@ typedef void (^RCTPromiseResolveBlock)(id);
 typedef void (^RCTPromiseRejectBlock)(NSString *, NSString *, NSError *);
 static NSString *const kErrorCapture = @"E_CAPTURE";
 static NSString *fault;
+extern void RNSCCreateAutoreleasedSentinel(void);
+extern NSUInteger RNSCAutoreleasedSentinelsAlive(void);
 static NSError *RNSCExceptionError(NSException *exception) {
     return [NSError errorWithDomain:@"probe" code:500 userInfo:@{NSLocalizedDescriptionKey: exception.reason}];
 }
@@ -25,6 +28,12 @@ static NSError *RNSCExceptionError(NSException *exception) {
 - (CGSize)size { return CGSizeMake(8, 4); }
 - (CGFloat)scale { return 1; }
 @end
+
+@interface UIWindow : NSObject
+@property(nonatomic) BOOL isKeyWindow;
+@property(nonatomic) CGRect bounds;
+@end
+@implementation UIWindow @end
 
 @interface FaultData : NSData
 @property(nonatomic) NSUInteger writes;
@@ -54,6 +63,7 @@ static NSError *RNSCExceptionError(NSException *exception) {
 }
 @end
 static NSData *UIImageJPEGRepresentation(UIImage *image, CGFloat quality) {
+    RNSCCreateAutoreleasedSentinel();
     if ([fault isEqual:@"jpeg_nil"]) return nil;
     if ([fault isEqual:@"codec_throws"]) [NSException raise:@"Injected" format:@"codec failed"];
     return [FaultData new];
@@ -64,16 +74,11 @@ static NSData *UIImagePNGRepresentation(UIImage *image) {
 }
 @interface FaultManager : NSFileManager
 @property(nonatomic) BOOL failList;
-@property(nonatomic) BOOL failRemove;
 @end
 @implementation FaultManager
 - (NSArray *)contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
     if (self.failList) { *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadNoPermissionError userInfo:nil]; return nil; }
     return [super contentsOfDirectoryAtPath:path error:error];
-}
-- (BOOL)removeItemAtPath:(NSString *)path error:(NSError **)error {
-    if (self.failRemove) { if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteNoPermissionError userInfo:nil]; return NO; }
-    return [super removeItemAtPath:path error:error];
 }
 @end
 @interface FaultStore : RNSCFileStore @end
@@ -111,6 +116,7 @@ static const NSTimeInterval kFrameWaitInterval = 0.001;
 @interface RNSCWindowCapture : NSObject @end
 @implementation RNSCWindowCapture
 #include "SerialCurrent.inc"
+#include "PrimaryCurrent.inc"
 #include "WaitCurrent.inc"
 @end
 @interface WaitProvider : NSObject <RNSCFrameProvider>
@@ -160,7 +166,8 @@ static CGImageRef RNSCCreateImageFromPixelBuffer(CVPixelBufferRef buffer) {
 static int bufferFinalizations;
 static void releasePixels(void *info, const void *base) { bufferFinalizations++; free((void *)base); }
 static int checks;
-static void check(BOOL ok) { checks++; if (!ok) [NSException raise:@"Assertion" format:@"check %d", checks]; }
+static void checkAt(BOOL ok, int line) { checks++; if (!ok) [NSException raise:@"Assertion" format:@"check %d at line %d", checks, line]; }
+#define check(...) checkAt((__VA_ARGS__), __LINE__)
 static void pumpUntil(BOOL (^condition)(void)) {
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2];
     while (!condition() && deadline.timeIntervalSinceNow > 0) {
@@ -203,6 +210,7 @@ int main(void) { @autoreleasepool {
         if ([name isEqual:@"disk_full"]) check(failure.code == NSFileWriteOutOfSpaceError);
         if ([name isEqual:@"permission_denied"]) check(failure.code == NSFileWriteNoPermissionError);
         if ([name isEqual:@"cancel_cleanup_throws"]) check(failure.userInfo[NSUnderlyingErrorKey] != nil);
+        check(RNSCAutoreleasedSentinelsAlive() == 0);
         if (!succeeds && ![name isEqual:@"cancel_cleanup_throws"]) check([manager contentsOfDirectoryAtPath:directory error:NULL].count == 0);
         [results addObject:@{@"case":name, @"resolve_calls":@(resolves), @"reject_calls":@(rejects), @"admission_releases":@(probe.finishCalls)}];
     }
@@ -215,9 +223,9 @@ int main(void) { @autoreleasepool {
     NSString *path = [store writeData:[@"abc" dataUsingEncoding:NSUTF8StringEncoding] extension:@"png" error:&error];
     check(path != nil && error == nil);
     faultManager.failList = YES; check([store clear:&error] == 0 && error != nil);
-    faultManager.failList = NO; faultManager.failRemove = YES; error = nil;
+    faultManager.failList = NO; chmod(folder.fileSystemRepresentation, 0500); error = nil;
     check([store clear:&error] == 0 && error != nil && [manager fileExistsAtPath:path]);
-    faultManager.failRemove = NO; error = nil; check([store clear:&error] == 1 && error == nil);
+    chmod(folder.fileSystemRepresentation, 0700); error = nil; check([store clear:&error] == 1 && error == nil);
     check(![store releaseURI:[NSURL fileURLWithPath:path].absoluteString error:&error] && !error);
     NSString *outside = [root stringByAppendingPathComponent:@"outside"];
     [manager createDirectoryAtPath:outside withIntermediateDirectories:YES attributes:nil error:NULL];
@@ -256,6 +264,15 @@ int main(void) { @autoreleasepool {
         check([store releaseURI:[NSURL fileURLWithPath:path].absoluteString error:&error] && error == nil);
     }
     check([manager contentsOfDirectoryAtPath:folder error:NULL].count == 0);
+    UIWindow *tiny = [UIWindow new]; tiny.bounds = CGRectMake(0, 0, 1, 1);
+    UIWindow *main = [UIWindow new]; main.bounds = CGRectMake(0, 0, 414, 896);
+    UIWindow *large = [UIWindow new]; large.bounds = CGRectMake(0, 0, 800, 900);
+    main.isKeyWindow = YES;
+    check([RNSCWindowCapture primaryWindowForWindows:@[tiny, main, large]] == main);
+    main.isKeyWindow = NO;
+    check([RNSCWindowCapture primaryWindowForWindows:@[tiny, main, large]] == large);
+    check([RNSCWindowCapture primaryWindowForWindows:@[main, tiny]] == main);
+    check([RNSCWindowCapture primaryWindowForWindows:@[tiny]] == tiny);
     __block int completed = 0, followup = 0;
     WaitProvider *provider = [WaitProvider new];
     [RNSCWindowCapture performSerially:^(dispatch_block_t done) {

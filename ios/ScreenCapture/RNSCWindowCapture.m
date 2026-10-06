@@ -106,6 +106,19 @@ static BOOL RNSCOperationRunning;
     RNSCOperationRunning = NO;
 }
 
++ (UIWindow *)primaryWindowForWindows:(NSArray<UIWindow *> *)windows
+{
+    // Back-to-front drawing order must not let a tiny auxiliary window define the viewport.
+    for (UIWindow *window in windows)
+        if (window.isKeyWindow) return window;
+    UIWindow *primary = windows.firstObject;
+    for (UIWindow *window in windows)
+        if (window.bounds.size.width * window.bounds.size.height >
+            primary.bounds.size.width * primary.bounds.size.height)
+            primary = window;
+    return primary;
+}
+
 + (void)captureNowExcludingStatusBar:(BOOL)excludeStatusBar
                               screen:(NSString *)screenSelector
                      markUnsupported:(BOOL)markUnsupported
@@ -132,6 +145,7 @@ static BOOL RNSCOperationRunning;
 
         NSMutableArray<NSValue *> *bounds = [NSMutableArray array];
         NSMutableArray *screens = [NSMutableArray array];
+        NSMutableArray<UIWindow *> *primaryWindows = [NSMutableArray array];
         double totalPixels = 0;
         for (UIWindow *window in allWindows)
         {
@@ -140,7 +154,8 @@ static BOOL RNSCOperationRunning;
         }
         for (NSArray<UIWindow *> *group in groups)
         {
-            UIWindow *primary = group.firstObject;
+            UIWindow *primary = [self primaryWindowForWindows:group];
+            [primaryWindows addObject:primary];
             double width = primary.bounds.size.width * primary.screen.scale;
             double height = primary.bounds.size.height * primary.screen.scale;
             if (!isfinite(width) || !isfinite(height) || width <= 0 || height <= 0)
@@ -170,6 +185,9 @@ static BOOL RNSCOperationRunning;
                                NSArray *currentGroups =
                                    [self windowGroupsForSelector:screenSelector];
                                BOOL unchanged = [groups isEqual:currentGroups];
+                               for (NSUInteger i = 0; i < groups.count; i++)
+                                   unchanged = unchanged &&
+                                       [self primaryWindowForWindows:groups[i]] == primaryWindows[i];
                                for (NSUInteger i = 0; i < allWindows.count; i++)
                                {
                                    unchanged = unchanged &&
@@ -485,7 +503,7 @@ static BOOL RNSCOperationRunning;
     NSMutableArray<CALayer *> *placeholders = [NSMutableArray array];
     UIImage *image = nil;
     BOOL primaryDrawn = YES;
-    UIWindow *primary = windows.firstObject;
+    UIWindow *primary = [self primaryWindowForWindows:windows];
     @try
     {
         [CATransaction begin];
@@ -619,8 +637,19 @@ static BOOL RNSCOperationRunning;
     if (CGRectIsEmpty(rect)) return nil;
 
     CALayer *marker = [self markerLayerWithReason:item.reason rect:rect];
-    [media insertSublayer:marker atIndex:0];
+    [self insertReplacementLayer:marker inMediaLayer:media];
     return marker;
+}
+
++ (void)insertReplacementLayer:(CALayer *)replacement inMediaLayer:(CALayer *)media
+{
+    // Array order only breaks ties in zPosition. Keep even negative-z controls above
+    // replacement pixels, without changing their geometry or relative ordering.
+    CGFloat lowest = 0;
+    for (CALayer *child in media.sublayers)
+        lowest = MIN(lowest, child.zPosition);
+    replacement.zPosition = lowest;
+    [media insertSublayer:replacement atIndex:0];
 }
 
 + (nullable CALayer *)installPlaceholderForProvider:(id<RNSCFrameProvider>)provider
@@ -666,7 +695,7 @@ static BOOL RNSCOperationRunning;
         }
         if (media)
         {
-            [host insertSublayer:container atIndex:0];
+            [self insertReplacementLayer:container inMediaLayer:host];
         }
         else
         {
