@@ -28,7 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 /** The view that hosts the media layer. Weak, because the tree changes under us. */
 @property (nonatomic, weak, readonly, nullable) UIView *targetView;
 
-/** The media layer itself, when we could reach it. The placeholder goes directly above it. */
+/** The media layer itself, when reachable. The placeholder is its first child layer. */
 @property (nonatomic, weak, readonly, nullable) CALayer *mediaLayer;
 
 /** Stable identity of this presentation; camera presentations share one frame reader. */

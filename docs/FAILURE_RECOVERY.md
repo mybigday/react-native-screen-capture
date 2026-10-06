@@ -92,9 +92,17 @@ successful capture. Physical VLC native-core playback/readback was also exercise
 
 On the physical iPhone, two distinct preview layers in a real AVCaptureMultiCamSession
 passed 11 reader/delegate/ownership checks using manually fed CoreVideo samples. This
-does not validate a live camera sensor or camera screenshot pixels. Android old/new
+does not validate a live camera sensor. A subsequent full RN check on both devices
+composited manually fed samples into two real preview layers and decoded two PNGs per
+device, with distinct media regions and restored host delegate/queue after cooldown.
+Raw images retained the triangle clip and visible controls; the Mac control color was
+near cyan rather than byte-exact cyan. No sensor inputs or running session were used.
+Android old/new
 architecture example APKs built successfully; their DEX superclasses were checked.
 The complete native tvOS fixture compiled and linked without signing or installation.
+It also compiled and linked against the tvOS Simulator SDK. A corrected read-only
+`simctl list devices available --json` query found three existing tvOS 26.5 simulators,
+all shut down. They were not booted or installed with a fixture in these runs.
 
 Still required: live camera capture with a controlled chart, physical Android/tvOS runtime
 tests, sleep/lock recovery, external-display transitions and simultaneous OS-screen

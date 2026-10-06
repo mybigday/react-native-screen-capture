@@ -260,7 +260,7 @@ refuses to read back, which is how DRM playback presents itself.
 await ScreenCapture.capture({ markUnsupported: true })
 ```
 
-The label is inserted into the component's own layer tree — above the media layer on iOS, in the
+The label is inserted into the component's own layer tree — inside the media layer on iOS, in the
 view's `ViewOverlay` on Android — so whatever covers the component on screen covers the label
 too. Occlusion, clipping and transforms stay the platform's job, exactly as for a captured
 frame.
