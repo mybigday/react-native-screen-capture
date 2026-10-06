@@ -93,8 +93,12 @@ dispatch_queue_t RNSCFileQueue(void)
 {
     NSURL *url = [NSURL URLWithString:uri];
     NSString *path = url.path.stringByStandardizingPath;
+    NSString *parent = path.stringByDeletingLastPathComponent.stringByStandardizingPath;
     if (!url.isFileURL || (url.host.length && ![url.host isEqual:@"localhost"]) ||
-        ![path.stringByDeletingLastPathComponent isEqual:_directory] ||
+        // Foundation can standardize an app-container alias differently after the cache
+        // directory is created, or after a file is deleted. Normalize the parent separately
+        // so releasing an already-missing file still compares two existing directories.
+        ![parent isEqual:_directory.stringByStandardizingPath] ||
         ![self ownsName:path.lastPathComponent])
     {
         if (error)

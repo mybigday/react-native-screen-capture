@@ -232,6 +232,24 @@ int main(void) { @autoreleasepool {
     [@"not a directory" writeToFile:folder atomically:YES encoding:NSUTF8StringEncoding error:NULL];
     error = nil; check([store writeData:[FaultData new] extension:@"png" error:&error] == nil && error != nil);
     [manager removeItemAtPath:folder error:NULL];
+    // Construct the store before a parent alias exists, then publish/release/clear after
+    // creating it. Foundation path normalization may change when the directory appears.
+    NSString *realParent = [root stringByAppendingPathComponent:@"late-real-parent"];
+    NSString *lateAlias = [root stringByAppendingPathComponent:@"late-parent-alias"];
+    [manager createDirectoryAtPath:realParent withIntermediateDirectories:YES attributes:nil error:NULL];
+    RNSCFileStore *lateStore = [[RNSCFileStore alloc]
+        initWithDirectory:[lateAlias stringByAppendingPathComponent:@"cache"] manager:manager];
+    [manager createSymbolicLinkAtPath:lateAlias withDestinationPath:realParent error:NULL];
+    error = nil;
+    NSString *latePath = [lateStore writeData:[@"alias fixture" dataUsingEncoding:NSUTF8StringEncoding]
+                                  extension:@"png" error:&error];
+    check(latePath != nil && error == nil);
+    check([lateStore releaseURI:[NSURL fileURLWithPath:latePath].absoluteString error:&error] && error == nil);
+    check(![lateStore releaseURI:[NSURL fileURLWithPath:latePath].absoluteString error:&error] && error == nil);
+    latePath = [lateStore writeData:[@"alias cleanup" dataUsingEncoding:NSUTF8StringEncoding]
+                         extension:@"png" error:&error];
+    check(latePath != nil && error == nil);
+    check([lateStore clear:&error] == 1 && error == nil);
     for (int i = 0; i < 100; i++) {
         error = nil; path = [store writeData:[FaultData new] extension:@"png" error:&error];
         check(path != nil && error == nil);

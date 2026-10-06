@@ -27,7 +27,7 @@ the host cache root are retained because a filename prefix does not establish ow
 
 The checks in [tests/README.md](../tests/README.md) exercise production control flow and real
 filesystem operations with safe injected failures. They cover five JS lifecycle groups,
-133 Java filesystem assertions, 11 extracted Android request checks and 297 native
+133 Java filesystem assertions, 11 extracted Android request checks and 302 native
 Foundation/control-flow/CoreVideo checks. TypeScript, library codegen, Android legacy/new
 architecture compilation and 16 Apple SDK syntax checks also passed.
 
@@ -38,11 +38,28 @@ A separate signed UIKit iOS-on-Mac fixture reproduced a transparent-secondary-wi
 capture with the original 3.1 renderer. In a sustained comparison, the baseline produced
 240 whole-black images and an opacity-only candidate produced none in 240 captures.
 The same fixture exposed stale provider reuse after remount. This evidence predates the
-combined changes here; it does not validate the combined candidate or establish a natural
-long-duration onset. A physical iPhone fixture build was attempted, but signing failed
-before installation or launch, so no combined-candidate physical-iPhone result is claimed.
+combined changes here and does not establish a natural long-duration onset.
 
-Still required: signed combined-candidate media/remount capture, real camera delegate
-restoration, transformed media pixels, full React bridge teardown and physical iPhone/tvOS
-and VLC checks. Memory fault injection and bounded capture runs do not prove the absence
+A subsequent signed physical-iPhone matrix ran 668 native-core captures across static,
+AV, fast/slow remount and sustained scenarios. The original 3.1 provider lost the media
+region in 10/12 fast-remount captures and 50/180 sustained captures after controlled
+remounts; the combined core candidate had no missing media region in those captures.
+Provider events and the raw image regions were checked together. Neither iPhone variant
+produced whole-black images. Its window-transition cases had only one window, so they
+do not validate multiple-window visibility transitions.
+
+A separate physical-iPhone file-store fault test found that Foundation standardized an
+app-container path differently before and after cache creation. Release/clear rejected
+the store's own newly published files. Re-standardizing both parent directories at
+ownership-check time also handles an already-deleted file while retaining directory/link
+checks. The test injects errors into
+small synthetic writes; it does not fill a disk or exercise the React Promise boundary.
+All nine physical store checks passed after the correction (publish, release, missing-file
+release, outside-path protection, injected disk-full, recovery write, two cleanup passes and
+symlink protection). An invalid screen produced the expected error, followed by eight
+successful native-core AV captures in the same process.
+
+Still required: real camera delegate restoration, transformed media pixels, full React
+bridge teardown, physical tvOS/VLC and real multiple-window/display transitions. Memory
+fault injection and bounded capture runs do not prove the absence
 of all memory/resource leaks.

@@ -27,7 +27,8 @@ Run `mkdir -p tests/out` before the Java commands on a fresh checkout.
 - The native probe extracts the byte-exact production encode/serial/wait methods and uses the
   real Foundation file store. UIKit codecs and React callbacks are stubs. It tests nil codecs,
   preserved disk-full/permission NSError, cache-directory purge, throwing operations/callbacks,
-  post-write cancellation/rollback failure, links, listing/deletion failure, repeated cleanup,
+  post-write cancellation/rollback failure, links, a parent alias created after store initialization,
+  listing/deletion failure, repeated cleanup,
   and an exception at the terminal wait poll followed by successful queue progress.
   Real CoreVideo buffers also verify that a throwing converter releases each provider's
   temporary buffer retain before detach.
