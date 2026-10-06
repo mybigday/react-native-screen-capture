@@ -2,13 +2,13 @@ package com.fugood.screencapture;
 
 import android.accessibilityservice.AccessibilityService;
 import android.content.ComponentName;
-import android.content.pm.PackageManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.hardware.display.DisplayManager;
 import android.hardware.HardwareBuffer;
+import android.hardware.display.DisplayManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -16,15 +16,14 @@ import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
-
+import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
-
-import androidx.annotation.Nullable;
-import androidx.annotation.RequiresApi;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Whole-display capture through {@link AccessibilityService#takeScreenshot}. Unlike the default
@@ -214,6 +213,15 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                     }
                 } else {
                     collected.add(bitmap);
+                    long pixels = 0;
+                    for (Bitmap part : collected)
+                        pixels += (long)part.getWidth() * part.getHeight();
+                    if (pixels > 64000000) {
+                        for (Bitmap part : collected)
+                            part.recycle();
+                        callback.onResult(null, "Captured displays exceed 64 megapixels");
+                        return;
+                    }
                 }
                 captureDisplays(service, displays, index + 1, collected, callback);
             }
@@ -226,87 +234,164 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
         if (parts.isEmpty()) return null;
         if (parts.size() == 1) return parts.get(0);
 
-        int width = 0, height = 0;
-        for (Bitmap part : parts) {
-            width += part.getWidth();
-            height = Math.max(height, part.getHeight());
-        }
-        Bitmap out;
+        Bitmap out = null;
         try {
-            out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        } catch (Throwable t) {
-            for (Bitmap part : parts) part.recycle();
+            long width = 0;
+            int height = 0;
+            for (Bitmap part : parts) {
+                width += part.getWidth();
+                height = Math.max(height, part.getHeight());
+            }
+            if (width > Integer.MAX_VALUE)
+                throw new IllegalArgumentException("Display width overflow");
+            CaptureFiles.scaledSize((int)width, height, 1);
+            out = Bitmap.createBitmap((int)width, height, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(out);
+            int x = 0;
+            for (Bitmap part : parts) {
+                canvas.drawBitmap(part, x, 0, null);
+                x += part.getWidth();
+            }
+            return out;
+        } catch (Throwable error) {
+            if (out != null)
+                out.recycle();
             return null;
+        } finally {
+            for (Bitmap part : parts)
+                if (!part.isRecycled())
+                    part.recycle();
         }
-        Canvas canvas = new Canvas(out);
-        int x = 0;
-        for (Bitmap part : parts) {
-            canvas.drawBitmap(part, x, 0, null);
-            x += part.getWidth();
-            part.recycle();
-        }
-        return out;
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
     private static void takeScreenshot(final ScreenCaptureAccessibilityService service,
                                        final int displayId, final int retriesLeft,
                                        final CaptureCallback callback) {
-        service.takeScreenshot(
-            displayId,
-            CAPTURE_EXECUTOR,
-            new AccessibilityService.TakeScreenshotCallback() {
-                @Override
-                public void onSuccess(AccessibilityService.ScreenshotResult result) {
-                    Bitmap bitmap = null;
-                    String error = null;
-                    HardwareBuffer buffer = result.getHardwareBuffer();
-                    try {
-                        Bitmap hardware = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
-                        if (hardware == null) {
-                            error = "Could not wrap the screenshot buffer";
-                        } else {
-                            try {
-                                // The hardware bitmap dies with the buffer and cannot be scaled
-                                // or re-encoded, so it has to be copied out before the buffer
-                                // closes. Copying a full display costs ~18MB and can throw; the
-                                // recycle belongs in a finally or the wrapper outlives it,
-                                // holding a reference to a buffer that is about to be closed.
-                                bitmap = hardware.copy(Bitmap.Config.ARGB_8888, false);
-                            } finally {
-                                hardware.recycle();
-                            }
-                            if (bitmap == null) error = "Could not copy the screenshot buffer";
-                        }
-                    } catch (Throwable t) {
-                        error = String.valueOf(t.getMessage());
-                    } finally {
-                        buffer.close();
-                    }
-                    // Deliberately outside the guarded block. The callback settles a Promise;
-                    // if something downstream threw, the catch above would settle it a second
-                    // time, which is a worse failure than letting the throw propagate.
-                    callback.onResult(bitmap, error);
-                }
+        new ScreenshotRequest(service, displayId, callback).start(retriesLeft);
+    }
 
-                @Override
-                public void onFailure(int errorCode) {
-                    // The platform rate-limits these (~333ms in AOSP). Back off once rather than
-                    // hardcoding a throttle, since the interval is not part of the contract.
-                    if (errorCode == AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT
-                        && retriesLeft > 0) {
-                        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-                            @Override
-                            public void run() {
-                                // Retry this display, not the whole selection.
-                                takeScreenshot(service, displayId, retriesLeft - 1, callback);
+    @RequiresApi(Build.VERSION_CODES.R)
+    private static final class ScreenshotRequest {
+        private final ScreenCaptureAccessibilityService service;
+        private final int display;
+        private final CaptureCallback callback;
+        private final AtomicBoolean terminal = new AtomicBoolean();
+        private final Handler handler = new Handler(Looper.getMainLooper());
+        private final Runnable timeout = () -> finish(null, "Screenshot callback timed out");
+        private Runnable retry;
+
+        ScreenshotRequest(ScreenCaptureAccessibilityService service, int display,
+                          CaptureCallback callback) {
+            this.service = service;
+            this.display = display;
+            this.callback = callback;
+            handler.postDelayed(timeout, 3000);
+        }
+
+        private void cancelTimers() {
+            handler.removeCallbacks(timeout);
+            synchronized (this) {
+                if (retry != null)
+                    handler.removeCallbacks(retry);
+                retry = null;
+            }
+        }
+
+        private void finish(Bitmap bitmap, String error) {
+            if (!terminal.compareAndSet(false, true)) {
+                if (bitmap != null)
+                    bitmap.recycle();
+                return;
+            }
+            cancelTimers();
+            callback.onResult(bitmap, error);
+        }
+
+        void start(final int retriesLeft) {
+            if (terminal.get())
+                return;
+            if (instance != service) {
+                finish(null, "Accessibility service disconnected");
+                return;
+            }
+            try {
+                service.takeScreenshot(
+                    display, CAPTURE_EXECUTOR, new AccessibilityService.TakeScreenshotCallback() {
+                        @Override
+                        public void onSuccess(AccessibilityService.ScreenshotResult result) {
+                            // Claim before copying. Timeout cannot release admission during a large
+                            // copy.
+                            boolean claimed = terminal.compareAndSet(false, true);
+                            if (claimed)
+                                cancelTimers();
+                            HardwareBuffer buffer = null;
+                            Bitmap bitmap = null;
+                            String error = null;
+                            try {
+                                buffer = result.getHardwareBuffer();
+                                if (claimed) {
+                                    Bitmap hardware =
+                                        Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
+                                    if (hardware == null)
+                                        error = "Could not wrap the screenshot buffer";
+                                    else {
+                                        try {
+                                            CaptureFiles.scaledSize(hardware.getWidth(),
+                                                                    hardware.getHeight(), 1);
+                                            bitmap = hardware.copy(Bitmap.Config.ARGB_8888, false);
+                                            if (bitmap == null)
+                                                error = "Could not copy the screenshot buffer";
+                                        } finally {
+                                            hardware.recycle();
+                                        }
+                                    }
+                                }
+                            } catch (Throwable failure) {
+                                if (bitmap != null) {
+                                    bitmap.recycle();
+                                    bitmap = null;
+                                }
+                                error = String.valueOf(failure.getMessage());
+                            } finally {
+                                if (buffer != null) {
+                                    try {
+                                        buffer.close();
+                                    } catch (Throwable failure) {
+                                        if (bitmap != null) {
+                                            bitmap.recycle();
+                                            bitmap = null;
+                                        }
+                                        error = String.valueOf(failure.getMessage());
+                                    }
+                                }
                             }
-                        }, RETRY_DELAY_MS);
-                        return;
-                    }
-                    callback.onResult(null, describeError(errorCode));
-                }
-            });
+                            // A late success closes its buffer without copying or delivering again.
+                            if (claimed)
+                                callback.onResult(bitmap, error);
+                        }
+
+                        @Override
+                        public void onFailure(int errorCode) {
+                            if (terminal.get())
+                                return;
+                            if (errorCode == AccessibilityService
+                                                 .ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT &&
+                                retriesLeft > 0) {
+                                synchronized (ScreenshotRequest.this) {
+                                    if (terminal.get())
+                                        return;
+                                    retry = () -> start(retriesLeft - 1);
+                                    handler.postDelayed(retry, RETRY_DELAY_MS);
+                                }
+                            } else
+                                finish(null, describeError(errorCode));
+                        }
+                    });
+            } catch (Throwable error) {
+                finish(null, String.valueOf(error.getMessage()));
+            }
+        }
     }
 
     @RequiresApi(Build.VERSION_CODES.R)

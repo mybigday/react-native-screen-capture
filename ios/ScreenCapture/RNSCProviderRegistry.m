@@ -52,6 +52,9 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
 @implementation RNSCProviderRegistry {
     NSMutableDictionary<NSString *, id<RNSCFrameProvider>> *_providers;
     NSTimer *_idleTimer;
+#if !TARGET_OS_TV
+    NSMapTable<NSString *, RNSCCameraFrameProvider *> *_cameraSources;
+#endif
 }
 
 + (RNSCProviderRegistry *)sharedRegistry
@@ -69,6 +72,9 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
     self = [super init];
     if (self) {
         _providers = [NSMutableDictionary dictionary];
+#if !TARGET_OS_TV
+        _cameraSources = [NSMapTable strongToWeakObjectsMapTable];
+#endif
     }
     return self;
 }
@@ -80,6 +86,13 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
     [_idleTimer invalidate];
     _idleTimer = nil;
 
+#if !TARGET_OS_TV
+    for (NSString *key in _cameraSources.keyEnumerator.allObjects)
+    {
+        if (![_cameraSources objectForKey:key])
+            [_cameraSources removeObjectForKey:key];
+    }
+#endif
     NSMutableArray<id<RNSCFrameProvider>> *found = [NSMutableArray array];
     for (UIWindow *window in windows) {
         [self discoverInView:window into:found];
@@ -107,16 +120,46 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
     _idleTimer = [NSTimer scheduledTimerWithTimeInterval:kIdleDetachDelay
                                                  repeats:NO
                                                    block:^(NSTimer *timer) {
-        [weakSelf detachAll];
-    }];
+                                                       @try
+                                                       {
+                                                           [weakSelf detachAll];
+                                                       }
+                                                       @catch (NSException *exception)
+                                                       {
+                                                           // Keep failed providers owned for a
+                                                           // later explicit cleanup/discovery
+                                                           // retry.
+                                                       }
+                                                   }];
 }
 
 - (void)detachAll
 {
     [_idleTimer invalidate];
     _idleTimer = nil;
-    for (id<RNSCFrameProvider> provider in _providers.allValues) [provider detach];
-    [_providers removeAllObjects];
+    NSException *failure = nil;
+    for (NSString *key in _providers.allKeys)
+    {
+        @try
+        {
+            [_providers[key] detach];
+            [_providers removeObjectForKey:key];
+        }
+        @catch (NSException *exception)
+        {
+            if (!failure)
+                failure = exception;
+        }
+    }
+#if !TARGET_OS_TV
+    for (NSString *key in _cameraSources.keyEnumerator.allObjects)
+    {
+        if (![_cameraSources objectForKey:key])
+            [_cameraSources removeObjectForKey:key];
+    }
+#endif
+    if (failure)
+        @throw failure;
 }
 
 #pragma mark - Discovery
@@ -133,16 +176,22 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
     UIResponder *next = view.nextResponder;
     if ([next isKindOfClass:AVPlayerViewController.class]) {
         AVPlayerViewController *controller = (AVPlayerViewController *)next;
-        if (controller.view == view && controller.player) {
-            [self addProviderWithIdentifier:[NSString stringWithFormat:@"player:%p", controller.player]
+        if (controller.view == view && controller.player &&
+            ![self view:view containsPlayerLayerFor:controller.player])
+        {
+            [self addProviderWithIdentifier:[RNSCPlayerFrameProvider
+                                                identifierForPlayer:controller.player
+                                                               view:view
+                                                              layer:nil]
                                        into:found
                                     builder:^id<RNSCFrameProvider> {
-                return [[RNSCPlayerFrameProvider alloc]
-                    initWithPlayer:controller.player
-                        targetView:view
-                        mediaLayer:nil
-                           gravity:RNSCContentsGravityForVideoGravity(controller.videoGravity)];
-            }];
+                                        return [[RNSCPlayerFrameProvider alloc]
+                                            initWithPlayer:controller.player
+                                                targetView:view
+                                                mediaLayer:nil
+                                                   gravity:RNSCContentsGravityForVideoGravity(
+                                                               controller.videoGravity)];
+                                    }];
         }
     }
 #endif
@@ -182,6 +231,25 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
     }
 }
 
+- (BOOL)view:(UIView *)view containsPlayerLayerFor:(AVPlayer *)player
+{
+    if (view.hidden || view.alpha <= 0.01)
+        return NO;
+    __block BOOL found = NO;
+    [self enumerateMediaLayersIn:view.layer
+                           using:^(CALayer *media, RNSCMediaLayerKind kind) {
+                               if (kind == RNSCMediaLayerKindPlayer &&
+                                   ((AVPlayerLayer *)media).player == player)
+                                   found = YES;
+                           }];
+    if (found)
+        return YES;
+    for (UIView *child in view.subviews)
+        if ([self view:child containsPlayerLayerFor:player])
+            return YES;
+    return NO;
+}
+
 - (void)inspectLayer:(CALayer *)layer
              forView:(UIView *)view
                 into:(NSMutableArray<id<RNSCFrameProvider>> *)found
@@ -192,14 +260,24 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
             case RNSCMediaLayerKindCameraPreview: {
                 AVCaptureVideoPreviewLayer *preview = (AVCaptureVideoPreviewLayer *)media;
                 if (!preview.session) return;
-                NSString *identifier =
-                    [NSString stringWithFormat:@"camera:%p", preview.session];
+                NSString *identifier = [NSString
+                    stringWithFormat:@"camera:%p:view:%p:layer:%p", preview.session, view, preview];
+                NSString *sourceKey = [NSString stringWithFormat:@"camera:%p", preview.session];
+                RNSCCameraFrameProvider *source = [self->_cameraSources objectForKey:sourceKey];
+                if (!source || ![source matchesSession:preview.session])
+                {
+                    source = [[RNSCCameraFrameProvider alloc] initWithPreviewLayer:preview
+                                                                        targetView:view];
+                    [self->_cameraSources setObject:source forKey:sourceKey];
+                }
                 [self addProviderWithIdentifier:identifier
                                            into:found
                                         builder:^id<RNSCFrameProvider> {
-                    return [[RNSCCameraFrameProvider alloc] initWithPreviewLayer:preview
-                                                                      targetView:view];
-                }];
+                                            return [[RNSCCameraPresentation alloc]
+                                                initWithSource:source
+                                                       preview:preview
+                                                          view:view];
+                                        }];
                 return;
             }
 #endif
@@ -207,7 +285,9 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
                 AVPlayerLayer *playerLayer = (AVPlayerLayer *)media;
                 if (!playerLayer.player) return;
                 NSString *identifier =
-                    [NSString stringWithFormat:@"player:%p", playerLayer.player];
+                    [RNSCPlayerFrameProvider identifierForPlayer:playerLayer.player
+                                                            view:view
+                                                           layer:playerLayer];
                 [self addProviderWithIdentifier:identifier
                                            into:found
                                         builder:^id<RNSCFrameProvider> {
@@ -222,7 +302,7 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
             case RNSCMediaLayerKindSampleBufferDisplay: {
                 AVSampleBufferDisplayLayer *display = (AVSampleBufferDisplayLayer *)media;
                 NSString *identifier =
-                    [NSString stringWithFormat:@"samplebuffer:%p", display];
+                    [NSString stringWithFormat:@"samplebuffer:%p:view:%p", display, view];
                 [self addProviderWithIdentifier:identifier
                                            into:found
                                         builder:^id<RNSCFrameProvider> {

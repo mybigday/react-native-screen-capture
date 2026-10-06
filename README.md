@@ -76,8 +76,14 @@ type CaptureResult = {
 }
 ```
 
-`includeBase64` costs a second full encode pass. Leave it off unless you need it — the file is
-already written and `uri` works directly in `<Image>`.
+`includeBase64` reuses the encoded bytes but holds an additional base64 string in memory.
+Leave it off unless you need it — `uri` works directly in `<Image>`.
+
+Await each capture before starting the next. Native capture admission is shared across module
+instances: an overlapping request rejects with `E_CAPTURE_BUSY` before allocating an image.
+Scale must be finite and positive; derived captures are limited to 64 megapixels. A window/media
+presentation changing during the iOS frame wait rejects with `E_CAPTURE`; retry after the
+transition finishes.
 
 #### Multiple screens
 
@@ -96,8 +102,9 @@ On Android the selector applies to `accessibility` mode. `view` mode can only re
 Activity's window, and a secondary display shows its content through a `Presentation`, whose
 window an Activity cannot get at — so `view` mode always returns the Activity's own screen.
 
-Files land in the app's cache directory and are never cleaned up automatically. Call
-`clearCache()` when it suits you.
+Files land in the module's cache directory. Release each result after its consumers finish with
+`releaseCapture(uri)`. The OS can purge cache files, so copy a result to app-owned storage when
+it needs to survive cache cleanup.
 
 ### `setMode(mode)` / `getMode()`
 
@@ -128,7 +135,30 @@ iOS only; no-ops elsewhere. See [Performance](#performance).
 
 ### `clearCache(): Promise<number>`
 
-Deletes every file this module has written. Resolves with the count.
+Deletes completed captures in the module's cache directory. Resolves with the count. Listing or
+deletion failures reject with `E_CAPTURE`; the message includes how many files were removed.
+Encoding, settlement and cleanup are ordered through a shared worker.
+
+Call this only after all consumers finish. It also deletes previously returned files that may
+still be uploading or displayed. Use `releaseCapture` for independent concurrent consumers.
+
+Android now uses `cache/react-native-screen-capture/` rather than the host cache root. Existing
+3.1 files in the root are retained: the previous `CAPTURE` prefix alone cannot establish ownership.
+Consumers that track those old URIs can delete them using their existing file API after use.
+
+### `releaseCapture(uri): Promise<boolean>`
+
+Deletes one completed capture after its consumers finish. Resolves `true` when removed, `false`
+when already missing. Rejects paths outside the module's cache or paths naming links/directories.
+
+```js
+const shot = await ScreenCapture.capture()
+try {
+  await uploadOrCopy(shot.uri) // your consumer
+} finally {
+  await ScreenCapture.releaseCapture(shot.uri)
+}
+```
 
 ### `addScreenshotListener(cb): Subscription`
 

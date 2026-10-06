@@ -37,7 +37,7 @@ export type CaptureOptions = {
    * `all` (default) stitches every screen the app is showing on, side by side, in one image --
    * an app whose content lives on an external display is captured, not the empty window left
    * behind on the built-in one. `main` captures only the built-in screen. A numeric string
-   * selects one screen by index.
+   * selects a screen index on iOS, or a display ID on Android accessibility mode.
    *
    * Single-screen devices are unaffected: every value produces the same one screen.
    */
@@ -80,6 +80,24 @@ const EVENT_SCREENSHOT = 'ScreenCapture'
 // A set rather than a counter, so a subscription removed twice cannot drive the count past
 // zero and stop detection under a listener that is still subscribed.
 const active = new Set<object>()
+let detectionStarted = false
+let detectionWork: Promise<void> = Promise.resolve()
+
+// Serialize starts/stops and read the current desired state after each native operation.
+// A failed start remains retryable when another subscriber arrives or the app resumes.
+function reconcileDetection(): void {
+  detectionWork = detectionWork.then(async () => {
+    try {
+      if (active.size > 0 && !detectionStarted) {
+        await NativeScreenCapture.startScreenshotDetection()
+        detectionStarted = true
+      } else if (active.size === 0 && detectionStarted) {
+        await NativeScreenCapture.stopScreenshotDetection()
+        detectionStarted = false
+      }
+    } catch { /* A later subscription/foreground transition retries the operation. */ }
+  })
+}
 
 const emitter = new NativeEventEmitter(
   // The TurboModule object is a valid emitter target on the new architecture;
@@ -96,7 +114,10 @@ let defaultMode: CaptureMode = 'auto'
 // null cache on every call and fire a round-trip each, which is what the cache is here to stop.
 let accessibilityStatus: Promise<PermissionStatus> | null = null
 AppState.addEventListener('change', (state) => {
-  if (state === 'active') accessibilityStatus = null
+  if (state === 'active') {
+    accessibilityStatus = null
+    reconcileDetection()
+  }
 })
 
 async function resolveMode(mode: CaptureMode): Promise<'view' | 'accessibility'> {
@@ -135,6 +156,12 @@ export function getMode(): CaptureMode {
 }
 
 export async function capture(options: CaptureOptions = {}): Promise<CaptureResult> {
+  if (!Number.isFinite(options.scale ?? 1) || (options.scale ?? 1) <= 0) {
+    throw new Error('scale must be a finite positive number')
+  }
+  if (!Number.isFinite(options.quality ?? 100)) {
+    throw new Error('quality must be finite')
+  }
   const mode = await resolveMode(options.mode ?? defaultMode)
   // Spread first, defaults after: rebuilding the object key by key dropped everything this
   // union does not name, which once turned an A/B test into two identical runs. Unknown keys
@@ -187,6 +214,11 @@ export function clearCache(): Promise<number> {
   return NativeScreenCapture.clearCache()
 }
 
+/** Delete one result after its consumers finish. Returns false if it was already removed. */
+export function releaseCapture(uri: string): Promise<boolean> {
+  return NativeScreenCapture.releaseCapture(uri)
+}
+
 /** Fires when the *user* takes a screenshot. Does not fire for `capture()`. */
 export function addScreenshotListener(
   listener: (event: ScreenshotEvent) => void,
@@ -194,14 +226,12 @@ export function addScreenshotListener(
   const sub = emitter.addListener(EVENT_SCREENSHOT, listener)
   const token = {}
   active.add(token)
-  NativeScreenCapture.startScreenshotDetection().catch(() => {})
+  reconcileDetection()
   return {
     remove: () => {
       if (!active.delete(token)) return
       sub.remove()
-      if (active.size === 0) {
-        NativeScreenCapture.stopScreenshotDetection().catch(() => {})
-      }
+      reconcileDetection()
     },
   }
 }
@@ -225,6 +255,7 @@ export default {
   warmUp,
   coolDown,
   clearCache,
+  releaseCapture,
   addScreenshotListener,
   dumpHierarchy,
 }

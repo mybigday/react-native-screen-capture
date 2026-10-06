@@ -1,0 +1,190 @@
+#import "RNSCFileStore.h"
+
+dispatch_queue_t RNSCFileQueue(void)
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      queue = dispatch_queue_create("com.fugood.screencapture.files", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+@implementation RNSCFileStore
+{
+    NSString *_directory;
+    NSFileManager *_manager;
+}
+
+- (instancetype)initWithDirectory:(NSString *)directory manager:(NSFileManager *)manager
+{
+    if ((self = [super init]))
+    {
+        _directory = [directory.stringByStandardizingPath copy];
+        _manager = manager;
+    }
+    return self;
+}
+
++ (instancetype)defaultStore
+{
+    NSString *caches =
+        NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+    return [[self alloc]
+        initWithDirectory:[caches stringByAppendingPathComponent:@"react-native-screen-capture"]
+                  manager:NSFileManager.defaultManager];
+}
+
+- (BOOL)ensureDirectory:(NSError **)error
+{
+    if (![_manager createDirectoryAtPath:_directory
+             withIntermediateDirectories:YES
+                              attributes:nil
+                                   error:error])
+        return NO;
+    NSDictionary *attributes = [_manager attributesOfItemAtPath:_directory error:error];
+    if (![attributes[NSFileType] isEqual:NSFileTypeDirectory])
+    {
+        if (error && !*error)
+            *error = [NSError
+                errorWithDomain:NSCocoaErrorDomain
+                           code:NSFileWriteInvalidFileNameError
+                       userInfo:@{NSLocalizedDescriptionKey : @"Capture cache is not a directory"}];
+        return NO;
+    }
+    return YES;
+}
+
+- (BOOL)ownsName:(NSString *)name
+{
+    NSString *stem = name.stringByDeletingPathExtension;
+    return [stem hasPrefix:@"CAPTURE-"] &&
+           [[NSUUID alloc] initWithUUIDString:[stem substringFromIndex:8]] != nil &&
+           ([@"png" isEqual:name.pathExtension] || [@"jpg" isEqual:name.pathExtension]);
+}
+
+- (nullable NSString *)writeData:(NSData *)data
+                       extension:(NSString *)extension
+                           error:(NSError **)error
+{
+    if (![self ensureDirectory:error])
+        return nil;
+    NSString *name =
+        [NSString stringWithFormat:@"CAPTURE-%@.%@", NSUUID.UUID.UUIDString, extension];
+    NSString *path = [_directory stringByAppendingPathComponent:name];
+    if ([data writeToFile:path options:NSDataWritingAtomic error:error])
+        return path;
+    // The OS may purge a cache directory between creation and write. Retry that case once;
+    // permissions and disk-full errors must reach the caller unchanged.
+    if (error && [(*error).domain isEqual:NSCocoaErrorDomain] &&
+        (*error).code == NSFileNoSuchFileError)
+    {
+        *error = nil;
+        if ([self ensureDirectory:error] && [data writeToFile:path
+                                                      options:NSDataWritingAtomic
+                                                        error:error])
+            return path;
+    }
+    [_manager removeItemAtPath:path error:NULL];
+    return nil;
+}
+
+- (BOOL)releaseURI:(NSString *)uri error:(NSError **)error
+{
+    NSURL *url = [NSURL URLWithString:uri];
+    NSString *path = url.path.stringByStandardizingPath;
+    if (!url.isFileURL || (url.host.length && ![url.host isEqual:@"localhost"]) ||
+        ![path.stringByDeletingLastPathComponent isEqual:_directory] ||
+        ![self ownsName:path.lastPathComponent])
+    {
+        if (error)
+            *error = [NSError
+                errorWithDomain:NSCocoaErrorDomain
+                           code:NSFileWriteInvalidFileNameError
+                       userInfo:@{
+                           NSLocalizedDescriptionKey : @"URI is not a capture owned by this module"
+                       }];
+        return NO;
+    }
+    NSDictionary *folder = [_manager attributesOfItemAtPath:_directory error:error];
+    if (!folder && error && (*error).code == NSFileReadNoSuchFileError)
+    {
+        *error = nil;
+        return NO;
+    }
+    if (![folder[NSFileType] isEqual:NSFileTypeDirectory])
+    {
+        if (error && !*error)
+            *error = [NSError
+                errorWithDomain:NSCocoaErrorDomain
+                           code:NSFileWriteInvalidFileNameError
+                       userInfo:@{
+                           NSLocalizedDescriptionKey : @"Capture cache is not a regular directory"
+                       }];
+        return NO;
+    }
+    NSDictionary *attributes = [_manager attributesOfItemAtPath:path error:error];
+    if (!attributes)
+    {
+        if (error && (*error).code == NSFileReadNoSuchFileError)
+            *error = nil;
+        return NO;
+    }
+    // Never follow links or recursively delete a directory supplied through a URI.
+    if (![attributes[NSFileType] isEqual:NSFileTypeRegular] ||
+        ![path.stringByResolvingSymlinksInPath
+            isEqual:[_directory.stringByResolvingSymlinksInPath
+                        stringByAppendingPathComponent:path.lastPathComponent]])
+    {
+        if (error)
+            *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                         code:NSFileWriteInvalidFileNameError
+                                     userInfo:@{
+                                         NSLocalizedDescriptionKey :
+                                             @"Capture URI does not name a regular cache file"
+                                     }];
+        return NO;
+    }
+    return [_manager removeItemAtPath:path error:error];
+}
+
+- (NSUInteger)clear:(NSError **)error
+{
+    NSDictionary *folder = [_manager attributesOfItemAtPath:_directory error:error];
+    if (!folder && error && (*error).code == NSFileReadNoSuchFileError)
+    {
+        *error = nil;
+        return 0;
+    }
+    if (![folder[NSFileType] isEqual:NSFileTypeDirectory])
+    {
+        if (error && !*error)
+            *error = [NSError
+                errorWithDomain:NSCocoaErrorDomain
+                           code:NSFileWriteInvalidFileNameError
+                       userInfo:@{
+                           NSLocalizedDescriptionKey : @"Capture cache is not a regular directory"
+                       }];
+        return 0;
+    }
+    NSArray<NSString *> *names = [_manager contentsOfDirectoryAtPath:_directory error:error];
+    NSUInteger removed = 0;
+    NSError *first = error ? *error : nil;
+    for (NSString *name in names)
+    {
+        if (![self ownsName:name])
+            continue;
+        NSError *failure = nil;
+        if ([self
+                releaseURI:[NSURL fileURLWithPath:[_directory stringByAppendingPathComponent:name]]
+                               .absoluteString
+                     error:&failure])
+            removed++;
+        if (!first && failure)
+            first = failure;
+    }
+    if (error)
+        *error = first;
+    return removed;
+}
+@end

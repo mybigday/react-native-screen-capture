@@ -200,6 +200,7 @@ final class WindowCapture {
             try {
                 // Inside the try: allocating a full-size ARGB_8888 buffer for a large surface is
                 // itself a place this can fail.
+                CaptureFiles.scaledSize(width, height, 1);
                 allocated = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
                 final Bitmap bitmap = allocated;
                 PixelCopy.request(view, bitmap, new PixelCopy.OnPixelCopyFinishedListener() {
@@ -306,6 +307,7 @@ final class WindowCapture {
         final int outHeight = height - top;
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            CaptureFiles.scaledSize(width, outHeight, 1);
             final Bitmap out = Bitmap.createBitmap(width, outHeight, Bitmap.Config.ARGB_8888);
             // Same hazard as the two hops before it: a window whose surface is destroyed
             // between the request and the copy leaves the listener uncalled, and this listener
@@ -351,6 +353,7 @@ final class WindowCapture {
         String failure = null;
         Bitmap full = null;
         try {
+            CaptureFiles.scaledSize(width, height, 1);
             full = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             decor.draw(new Canvas(full));
             out = cropTop(full, top);

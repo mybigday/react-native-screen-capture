@@ -15,6 +15,9 @@ static const NSTimeInterval kFrameWaitInterval = 0.016;
 /** Placed above anything the host view draws itself when we cannot reach the media layer. */
 static const CGFloat kPlaceholderZPosition = 1.0e6;
 
+static NSMutableArray *RNSCPendingOperations;
+static BOOL RNSCOperationRunning;
+
 @implementation RNSCWindowCapture
 
 + (void)captureExcludingStatusBar:(BOOL)excludeStatusBar
@@ -41,53 +44,240 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
         return;
     }
 
-    NSArray<NSArray<UIWindow *> *> *groups = [self windowGroupsForSelector:screenSelector];
-    NSMutableArray<UIWindow *> *allWindows = [NSMutableArray array];
-    for (NSArray<UIWindow *> *group in groups) [allWindows addObjectsFromArray:group];
-    if (allWindows.count == 0) {
-        completion(nil, [NSError errorWithDomain:kErrorDomain
-                                            code:404
-                                        userInfo:@{NSLocalizedDescriptionKey: @"No visible window"}]);
+    [self performSerially:^(dispatch_block_t done) {
+        __block BOOL delivered = NO;
+        [self captureNowExcludingStatusBar:excludeStatusBar
+                                    screen:screenSelector
+                           markUnsupported:markUnsupported
+                                completion:^(UIImage *image, NSError *error) {
+                                    if (delivered)
+                                        return;
+                                    delivered = YES;
+                                    @try
+                                    {
+                                        completion(image, error);
+                                    }
+                                    @finally
+                                    {
+                                        done();
+                                    }
+                                }];
+    }];
+}
+
++ (void)performSerially:(void (^)(dispatch_block_t done))operation
+{
+    if (!NSThread.isMainThread)
+    {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self performSerially:operation];
+        });
         return;
     }
+    if (!RNSCPendingOperations)
+        RNSCPendingOperations = [NSMutableArray array];
+    [RNSCPendingOperations addObject:[operation copy]];
+    if (RNSCOperationRunning)
+        return;
+    RNSCOperationRunning = YES;
+    [self drainOperations:RNSCPendingOperations];
+}
 
-    RNSCProviderRegistry *registry = RNSCProviderRegistry.sharedRegistry;
-    NSArray<id<RNSCFrameProvider>> *providers = [registry attachedProvidersForWindows:allWindows];
++ (void)drainOperations:(NSMutableArray *)pending
+{
+    void (^operation)(dispatch_block_t) = pending.firstObject;
+    [pending removeObjectAtIndex:0];
+    __block BOOL completed = NO;
+    operation(^{
+        if (completed)
+            return;
+        completed = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (pending.count)
+                [self drainOperations:pending];
+            else
+                [self serialQueueDidDrain];
+        });
+    });
+}
 
-    [self waitForFrames:providers attempt:0 then:^{
-        NSError *renderError = nil;
-        NSMutableArray<UIImage *> *perScreen = [NSMutableArray array];
-        for (NSArray<UIWindow *> *group in groups) {
-            // The status bar only exists on the main screen, so only the first group is cropped.
-            BOOL crop = excludeStatusBar && group == groups.firstObject;
-            // Only the providers on this screen: installing a placeholder into another
-            // screen's layer tree, once per group, is wasted frame pulls and needless churn.
-            NSMutableArray<id<RNSCFrameProvider>> *onScreen = [NSMutableArray array];
-            for (id<RNSCFrameProvider> provider in providers) {
-                UIWindow *host = provider.targetView.window;
-                if (host && [group containsObject:host]) [onScreen addObject:provider];
++ (void)serialQueueDidDrain
+{
+    RNSCOperationRunning = NO;
+}
+
++ (void)captureNowExcludingStatusBar:(BOOL)excludeStatusBar
+                              screen:(NSString *)screenSelector
+                     markUnsupported:(BOOL)markUnsupported
+                          completion:(void (^)(UIImage *, NSError *))completion
+{
+    @try
+    {
+        NSArray<NSArray<UIWindow *> *> *groups = [self windowGroupsForSelector:screenSelector];
+        NSMutableArray<UIWindow *> *allWindows = [NSMutableArray array];
+        for (NSArray<UIWindow *> *group in groups)
+            [allWindows addObjectsFromArray:group];
+        if (allWindows.count == 0)
+        {
+            completion(
+                nil, [NSError errorWithDomain:kErrorDomain
+                                         code:404
+                                     userInfo:@{NSLocalizedDescriptionKey : @"No visible window"}]);
+            return;
+        }
+
+        RNSCProviderRegistry *registry = RNSCProviderRegistry.sharedRegistry;
+        NSArray<id<RNSCFrameProvider>> *providers =
+            [registry attachedProvidersForWindows:allWindows];
+
+        NSMutableArray<NSValue *> *bounds = [NSMutableArray array];
+        NSMutableArray *screens = [NSMutableArray array];
+        double totalPixels = 0;
+        for (UIWindow *window in allWindows)
+        {
+            [bounds addObject:[NSValue valueWithCGRect:window.bounds]];
+            [screens addObject:window.windowScene.screen ?: window.screen];
+        }
+        for (NSArray<UIWindow *> *group in groups)
+        {
+            UIWindow *primary = group.firstObject;
+            double width = primary.bounds.size.width * primary.screen.scale;
+            double height = primary.bounds.size.height * primary.screen.scale;
+            if (!isfinite(width) || !isfinite(height) || width <= 0 || height <= 0)
+            {
+                [NSException raise:@"CaptureDimensions" format:@"Invalid window dimensions"];
             }
-            UIImage *part = [self renderWindows:group
-                                      providers:onScreen
-                             excludingStatusBar:crop
-                                markUnsupported:markUnsupported
-                                          error:&renderError];
-            if (!part) break;
-            [perScreen addObject:part];
+            totalPixels += width * height;
         }
-        [registry scheduleIdleDetach];
+        if (totalPixels > 64000000)
+            [NSException raise:@"CaptureDimensions" format:@"Capture exceeds 64 megapixels"];
 
-        UIImage *image = perScreen.count == groups.count ? [self composeImages:perScreen] : nil;
-        if (image) {
-            completion(image, nil);
-        } else {
-            completion(nil, renderError ?: [NSError errorWithDomain:kErrorDomain
-                                                               code:500
-                                                           userInfo:@{
-                NSLocalizedDescriptionKey: @"Render failed"
-            }]);
-        }
-    }];
+        [self waitForFrames:providers
+                    attempt:0
+                       then:^(NSError *frameError) {
+                           if (frameError)
+                           {
+                               [registry scheduleIdleDetach];
+                               completion(nil, frameError);
+                               return;
+                           }
+                           @try
+                           {
+                               NSMutableArray<NSNumber *> *generations = [NSMutableArray array];
+                               for (id<RNSCFrameProvider> provider in providers) {
+                                   [generations addObject:@([provider respondsToSelector:@selector(attachmentGeneration)] ? provider.attachmentGeneration : 0)];
+                               }
+                               NSArray *currentGroups =
+                                   [self windowGroupsForSelector:screenSelector];
+                               BOOL unchanged = [groups isEqual:currentGroups];
+                               for (NSUInteger i = 0; i < allWindows.count; i++)
+                               {
+                                   unchanged = unchanged &&
+                                               CGRectEqualToRect(allWindows[i].bounds,
+                                                                 bounds[i].CGRectValue) &&
+                                               (allWindows[i].windowScene.screen
+                                                    ?: allWindows[i].screen) == screens[i];
+                               }
+                               for (id<RNSCFrameProvider> provider in providers)
+                                   unchanged = unchanged && provider.isAlive;
+                               if (unchanged)
+                               {
+                                   // Discovery can change inside identical windows (remount, new
+                                   // media layer/item). At the end of the wait it is safe to prune;
+                                   // retry instead of drawing stale providers.
+                                   NSArray *currentProviders =
+                                       [registry attachedProvidersForWindows:allWindows];
+                                   unchanged = [providers isEqual:currentProviders];
+                                   for (NSUInteger i = 0; i < providers.count; i++) {
+                                       NSUInteger generation = [providers[i] respondsToSelector:@selector(attachmentGeneration)] ? providers[i].attachmentGeneration : 0;
+                                       unchanged = unchanged && generation == generations[i].unsignedIntegerValue;
+                                   }
+                               }
+                               if (!unchanged)
+                               {
+                                   [registry scheduleIdleDetach];
+                                   completion(nil,
+                                              [NSError
+                                                  errorWithDomain:kErrorDomain
+                                                             code:409
+                                                         userInfo:@{
+                                                             NSLocalizedDescriptionKey :
+                                                                 @"Windows changed while waiting "
+                                                                 @"for a media frame; retry capture"
+                                                         }]);
+                                   return;
+                               }
+                               NSError *renderError = nil;
+                               NSMutableArray<UIImage *> *perScreen = [NSMutableArray array];
+                               for (NSArray<UIWindow *> *group in groups)
+                               {
+                                   // The status bar only exists on the main screen, so only the
+                                   // first group is cropped.
+                                   BOOL crop = excludeStatusBar && group == groups.firstObject;
+                                   // Only the providers on this screen: installing a placeholder
+                                   // into another screen's layer tree, once per group, is wasted
+                                   // frame pulls and needless churn.
+                                   NSMutableArray<id<RNSCFrameProvider>> *onScreen =
+                                       [NSMutableArray array];
+                                   for (id<RNSCFrameProvider> provider in providers)
+                                   {
+                                       UIWindow *host = provider.targetView.window;
+                                       if (host && [group containsObject:host])
+                                           [onScreen addObject:provider];
+                                   }
+                                   UIImage *part = [self renderWindows:group
+                                                             providers:onScreen
+                                                    excludingStatusBar:crop
+                                                       markUnsupported:markUnsupported
+                                                                 error:&renderError];
+                                   if (!part)
+                                       break;
+                                   [perScreen addObject:part];
+                               }
+                               [registry scheduleIdleDetach];
+
+                               UIImage *image = perScreen.count == groups.count
+                                                    ? [self composeImages:perScreen]
+                                                    : nil;
+                               if (image)
+                               {
+                                   completion(image, nil);
+                               }
+                               else
+                               {
+                                   completion(nil,
+                                              renderError
+                                                  ?: [NSError errorWithDomain:kErrorDomain
+                                                                         code:500
+                                                                     userInfo:@{
+                                                                         NSLocalizedDescriptionKey :
+                                                                             @"Render failed"
+                                                                     }]);
+                               }
+                           }
+                           @catch (NSException *exception)
+                           {
+                               [registry scheduleIdleDetach];
+                               completion(nil, [NSError errorWithDomain:kErrorDomain
+                                                                   code:500
+                                                               userInfo:@{
+                                                                   NSLocalizedDescriptionKey :
+                                                                           exception.reason
+                                                                       ?: @"Render failed"
+                                                               }]);
+                           }
+                       }];
+    }
+    @catch (NSException *exception)
+    {
+        [RNSCProviderRegistry.sharedRegistry scheduleIdleDetach];
+        completion(nil, [NSError errorWithDomain:kErrorDomain
+                                            code:500
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey : exception.reason
+                                                ?: @"Capture failed"
+                                        }]);
+    }
 }
 
 /**
@@ -160,6 +350,10 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
         height = MAX(height, (CGFloat)CGImageGetHeight(cg));
     }
 
+    if (!isfinite(width * height) || width * height > 64000000)
+    {
+        [NSException raise:@"CaptureDimensions" format:@"Stitched capture exceeds 64 megapixels"];
+    }
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
     format.opaque = YES;
     format.scale = 1;
@@ -227,37 +421,50 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
 
 + (void)waitForFrames:(NSArray<id<RNSCFrameProvider>> *)providers
               attempt:(NSInteger)attempt
-                 then:(void (^)(void))next
+                 then:(void (^)(NSError *_Nullable))next
 {
-    if (providers.count == 0) {
-        next();
-        return;
-    }
-    if (attempt >= kMaxFrameWaitAttempts) {
-        // Remember who ran the budget out. A provider that can never deliver -- DRM content,
-        // a camera session that refused an output -- would otherwise cost every capture for the
-        // rest of the app's life the full wait, silently.
-        for (id<RNSCFrameProvider> provider in providers) {
-            if (!provider.hasFrame) [[self hopelessProviders] addObject:provider];
-        }
-        next();
+    if (providers.count == 0)
+    {
+        next(nil);
         return;
     }
     BOOL ready = YES;
-    for (id<RNSCFrameProvider> provider in providers) {
-        // No early exit: -hasFrame is what pumps a player provider, so breaking here would
-        // leave everything behind the first not-ready provider unpumped for the whole budget
-        // and then declared hopeless off a single pump at the end.
-        if (provider.hasFrame) {
-            // It recovered: start blocking on it again.
-            [[self hopelessProviders] removeObject:provider];
-            continue;
+    NSError *failure = nil;
+    @try
+    {
+        if (attempt >= kMaxFrameWaitAttempts)
+        {
+            for (id<RNSCFrameProvider> provider in providers)
+            {
+                if (!provider.hasFrame)
+                    [[self hopelessProviders] addObject:provider];
+            }
         }
-        if ([[self hopelessProviders] containsObject:provider]) continue;
-        ready = NO;
+        else
+        {
+            // Pump every provider, including everything behind a provider without a frame.
+            for (id<RNSCFrameProvider> provider in providers)
+            {
+                if (provider.hasFrame)
+                    [[self hopelessProviders] removeObject:provider];
+                else if (![[self hopelessProviders] containsObject:provider])
+                    ready = NO;
+            }
+        }
     }
-    if (ready) {
-        next();
+    @catch (NSException *exception)
+    {
+        failure = [NSError
+            errorWithDomain:kErrorDomain
+                       code:500
+                   userInfo:@{
+                       NSLocalizedDescriptionKey : exception.reason ?: @"Frame provider failed"
+                   }];
+    }
+    // Operational exceptions and callback exceptions have separate ownership.
+    if (failure || ready || attempt >= kMaxFrameWaitAttempts)
+    {
+        next(failure);
         return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kFrameWaitInterval * NSEC_PER_SEC)),
@@ -276,40 +483,53 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     // transforms come out right without us computing occlusion, and so the whole thing needs
     // exactly one full-hierarchy render no matter how many media components are on screen.
     NSMutableArray<CALayer *> *placeholders = [NSMutableArray array];
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    for (id<RNSCFrameProvider> provider in providers) {
-        CALayer *placeholder = [self installPlaceholderForProvider:provider
-                                                   markUnsupported:markUnsupported];
-        if (placeholder) [placeholders addObject:placeholder];
-    }
-    if (markUnsupported) {
-        // Layers we can see but cannot read on this OS. Marked through the same insertion
-        // point as the placeholders, so anything drawn over them still covers the label.
-        for (RNSCUnreachableLayer *item in
-             [RNSCProviderRegistry.sharedRegistry unreachableLayersForWindows:windows]) {
-            CALayer *marker = [self installMarkerForUnreachable:item];
-            if (marker) [placeholders addObject:marker];
+    UIImage *image = nil;
+    BOOL primaryDrawn = YES;
+    UIWindow *primary = windows.firstObject;
+    @try
+    {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        @try
+        {
+            for (id<RNSCFrameProvider> provider in providers)
+            {
+                CALayer *placeholder = [self installPlaceholderForProvider:provider
+                                                           markUnsupported:markUnsupported];
+                if (placeholder)
+                    [placeholders addObject:placeholder];
+            }
+            if (markUnsupported)
+            {
+                // Layers we can see but cannot read on this OS. Marked through the same insertion
+                // point as the placeholders, so anything drawn over them still covers the label.
+                for (RNSCUnreachableLayer *item in
+                     [RNSCProviderRegistry.sharedRegistry unreachableLayersForWindows:windows])
+                {
+                    CALayer *marker = [self installMarkerForUnreachable:item];
+                    if (marker) [placeholders addObject:marker];
         }
     }
-    [CATransaction commit];
+        }
+        @finally
+        {
+            [CATransaction commit];
+        }
 
-    UIWindow *primary = windows.firstObject;
     CGRect bounds = primary.bounds;
 
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    format.opaque = YES;
+    format.opaque = NO;
     format.scale = primary.screen.scale;
 
     UIGraphicsImageRenderer *renderer =
         [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size format:format];
-    // drawViewHierarchyInRect: reports failure by returning NO, not by throwing, and
-    // imageWithActions: hands back an image either way. With format.opaque = YES that image is
-    // solid black -- so ignoring the result turns "the system refused to snapshot" into a
-    // screenshot that looks like a legitimately black screen and resolves successfully.
-    __block BOOL primaryDrawn = YES;
-    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        for (UIWindow *window in windows) {
+    // Transparent system overlays must not flatten the already-drawn primary window to black.
+    // Preserve the primary draw failure signal independently of renderer opacity.
+    __block BOOL drawSucceeded = YES;
+    image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        for (UIWindow *window in windows)
+        {
             // The context is anchored at the primary window's origin, not the screen's, so
             // draw each window where it lands *within that window* -- window.frame is in
             // screen coordinates and is only the same thing when the primary window happens
@@ -319,14 +539,21 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
                              afterScreenUpdates:YES];
             // Only the primary window is fatal. A transient overlay -- a keyboard or an alert
             // window -- refusing to snapshot should not throw away the screenshot underneath it.
-            if (!drawn && window == primary) primaryDrawn = NO;
+            if (!drawn && window == primary)
+                drawSucceeded = NO;
         }
     }];
+    primaryDrawn = drawSucceeded;
+    }
+    @finally
+    {
 
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    for (CALayer *placeholder in placeholders) [placeholder removeFromSuperlayer];
-    [CATransaction commit];
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        for (CALayer *placeholder in placeholders)
+            [placeholder removeFromSuperlayer];
+        [CATransaction commit];
+    }
 
     if (!primaryDrawn) {
         if (error) {
@@ -389,10 +616,12 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     if (!target || !media) return nil;
 
     CALayer *host = media.superlayer ?: target.layer;
-    CGRect rect = media.superlayer ? media.frame : target.bounds;
+    CGRect rect = media.superlayer ? media.bounds : target.bounds;
     if (CGRectIsEmpty(rect)) return nil;
 
     CALayer *marker = [self markerLayerWithReason:item.reason rect:rect];
+    if (media.superlayer)
+        [self copyGeometry:media to:marker];
     if (media.superlayer) {
         [host insertSublayer:marker above:media];
     } else {
@@ -408,56 +637,75 @@ static const CGFloat kPlaceholderZPosition = 1.0e6;
     UIView *target = provider.targetView;
     if (!target) return nil;
 
-    CGImageRef frame = [provider newFrameImage];
-
     CALayer *media = provider.mediaLayer;
-    CALayer *host = media.superlayer ?: target.layer;
-    CGRect rect = media ? media.frame : target.bounds;
-    if (CGRectIsEmpty(rect)) {
-        if (frame) CGImageRelease(frame);
+    BOOL sibling = media.superlayer != nil;
+    CALayer *host = sibling ? media.superlayer : target.layer;
+    CGRect rect = sibling ? media.bounds : target.bounds;
+    if (CGRectIsEmpty(rect) || (media && (media.hidden || media.opacity <= 0.01)))
         return nil;
-    }
-
-    if (!frame) {
-        // Attached, but the pipeline yielded nothing -- DRM-protected video, or a capture
-        // session that refused an output. Without marking, this region simply renders black.
-        if (!markUnsupported) return nil;
-        CALayer *marker =
-            [self markerLayerWithReason:@"No frame available (protected or unavailable)"
-                                   rect:rect];
-        if (media && media.superlayer) {
-            [host insertSublayer:marker above:media];
-        } else {
-            marker.zPosition = kPlaceholderZPosition;
-            [host addSublayer:marker];
+    CGImageRef frame = [provider newFrameImage];
+    CALayer *container = nil;
+    @try
+    {
+        if (!frame)
+        {
+            if (!markUnsupported)
+                return nil;
+            container = [self markerLayerWithReason:@"No frame available (protected or unavailable)"
+                                               rect:rect];
         }
-        return marker;
+        else
+        {
+            container = [CALayer layer];
+            container.bounds = rect;
+            container.position = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
+            container.masksToBounds = YES;
+            CALayer *pixels = [CALayer layer];
+            pixels.contents = (__bridge id)frame;
+            pixels.contentsGravity = provider.contentsGravity;
+            CATransform3D transform = provider.contentsTransform;
+            BOOL quarterTurn = fabs(transform.m11) < 0.5;
+            pixels.bounds = CGRectMake(0, 0, quarterTurn ? rect.size.height : rect.size.width,
+                                       quarterTurn ? rect.size.width : rect.size.height);
+            pixels.position = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
+            pixels.transform = transform;
+            [container addSublayer:pixels];
+        }
+        if (sibling)
+        {
+            [self copyGeometry:media to:container];
+            [host insertSublayer:container above:media];
+        }
+        else
+        {
+            container.zPosition = kPlaceholderZPosition;
+            [host addSublayer:container];
+        }
+        return container;
     }
-
-    CALayer *placeholder = [CALayer layer];
-    placeholder.contents = (__bridge id)frame;
-    placeholder.contentsGravity = provider.contentsGravity;
-    placeholder.masksToBounds = YES;
-    // Set bounds/position rather than frame: frame is undefined once a transform is applied.
-    // A quarter turn has to swap the layer's bounds as well: rotating a rect-shaped layer about
-    // its centre leaves it overhanging the media rect with the aspect transposed. Only rotations
-    // that are multiples of 90 are produced here, so a near-zero m11 identifies the odd ones.
-    CATransform3D transform = provider.contentsTransform;
-    BOOL quarterTurn = fabs(transform.m11) < 0.5;
-    CGFloat boundsWidth = quarterTurn ? CGRectGetHeight(rect) : CGRectGetWidth(rect);
-    CGFloat boundsHeight = quarterTurn ? CGRectGetWidth(rect) : CGRectGetHeight(rect);
-    placeholder.bounds = CGRectMake(0, 0, boundsWidth, boundsHeight);
-    placeholder.position = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
-    placeholder.transform = transform;
-    CGImageRelease(frame);
-
-    if (media && media.superlayer) {
-        [host insertSublayer:placeholder above:media];
-    } else {
-        placeholder.zPosition = kPlaceholderZPosition;
-        [host addSublayer:placeholder];
+    @finally
+    {
+        if (frame)
+            CGImageRelease(frame);
     }
-    return placeholder;
+}
+
++ (void)copyGeometry:(CALayer *)media to:(CALayer *)container
+{
+    container.bounds = media.bounds;
+    container.anchorPoint = media.anchorPoint;
+    container.anchorPointZ = media.anchorPointZ;
+    container.position = media.position;
+    container.transform = media.transform;
+    container.zPosition = media.zPosition;
+    container.opacity = media.opacity;
+    container.hidden = media.hidden;
+    if (media.masksToBounds)
+    {
+        container.cornerRadius = media.cornerRadius;
+        container.maskedCorners = media.maskedCorners;
+        container.cornerCurve = media.cornerCurve;
+    }
 }
 
 + (UIImage *)cropStatusBarFromImage:(UIImage *)image window:(UIWindow *)window

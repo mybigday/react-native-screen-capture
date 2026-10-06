@@ -31,7 +31,7 @@ NS_ASSUME_NONNULL_BEGIN
 /** The media layer itself, when we could reach it. The placeholder goes directly above it. */
 @property (nonatomic, weak, readonly, nullable) CALayer *mediaLayer;
 
-/** Stable identity of the underlying pipeline, so we do not attach to it twice. */
+/** Stable identity of this presentation; camera presentations share one frame reader. */
 @property (nonatomic, copy, readonly) NSString *identifier;
 
 /** Still worth keeping around? Providers whose target view is gone are dropped. */
@@ -45,6 +45,11 @@ NS_ASSUME_NONNULL_BEGIN
  */
 - (void)attach;
 - (void)detach;
+
+/** Changes when discovery reacquires a hook, invalidating readiness established earlier. */
+@optional
+@property(nonatomic, readonly) NSUInteger attachmentGeneration;
+@required
 
 /** Whether a frame is available right now. False right after attaching. */
 - (BOOL)hasFrame;
