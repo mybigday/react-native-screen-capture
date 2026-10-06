@@ -35,5 +35,6 @@ Run `mkdir -p tests/out` before the Java commands on a fresh checkout.
 
 These are control-flow and filesystem tests. They do not prove React bridge teardown, camera
 delegate behavior, transformed video pixels, or iPhone/tvOS media capture. Those require a signed
-fixture/device run. Existing Mac black-frame A/B evidence is kept outside this checkout under
-the task's `diagnostics-19156/`; it predates the combined recovery changes.
+fixture/device run. The separate native-core hardware results and remaining limits are described
+in [Failure recovery](../docs/FAILURE_RECOVERY.md); running these probes does not reproduce those
+hardware checks.
