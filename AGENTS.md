@@ -15,7 +15,8 @@ doing a single normal capture:
 - **Android** — `PixelCopy` each `SurfaceView`, install the result as a `ViewOverlay` on that
   same view, then one window readback.
 - **iOS** — find the `AVPlayer` / `AVCaptureSession` by introspection, pull a frame, insert a
-  placeholder `CALayer` above the media layer, then one `drawViewHierarchy` pass.
+  placeholder inside the media layer beneath its existing children, then one
+  `drawViewHierarchy` pass. A sibling bypasses arbitrary masks and can cover view controls.
 
 Both put the frame back where the view system will draw it, so z-order, clipping and transforms
 come out right without computing occlusion, and the cost stays at one full-screen render.
@@ -109,11 +110,14 @@ resolution for every package. The Metro warning it silences is harmless.
 
 ### codesign over SSH
 
-macOS ties keychain access to the security session, and an SSH login gets its own, so `codesign`
-fails with `errSecInternalComponent` no matter what you unlock. Starting `tmux` from the SSH
-session does not help — it inherits the same session. What works: have someone start a tmux
-server from a GUI Terminal once (`tmux new -d -s build`), then drive builds with
-`tmux send-keys -t build …`, which run in the GUI session.
+`errSecInternalComponent` does not establish that signing requires a GUI session. In the
+physical regression run, the owner's existing authorized unlock helper restored signing
+directly over SSH. Check keychain lock/access first, and never print the helper's credential
+arguments or output.
+
+If security-session access still prevents signing, a tmux server started from a GUI Terminal
+(`tmux new -d -s build`) can provide that session; drive it with `tmux send-keys -t build …`.
+A tmux server started from SSH inherits the SSH session.
 
 Wait for the pane to be idle before sending — keys sent while a build is running go to that
 process's stdin, not the shell, and you will spend a while reading stale logs. Use a unique log
