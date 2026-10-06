@@ -615,19 +615,11 @@ static BOOL RNSCOperationRunning;
     CALayer *media = item.mediaLayer;
     if (!target || !media) return nil;
 
-    CALayer *host = media.superlayer ?: target.layer;
-    CGRect rect = media.superlayer ? media.bounds : target.bounds;
+    CGRect rect = media.bounds;
     if (CGRectIsEmpty(rect)) return nil;
 
     CALayer *marker = [self markerLayerWithReason:item.reason rect:rect];
-    if (media.superlayer)
-        [self copyGeometry:media to:marker];
-    if (media.superlayer) {
-        [host insertSublayer:marker above:media];
-    } else {
-        marker.zPosition = kPlaceholderZPosition;
-        [host addSublayer:marker];
-    }
+    [media insertSublayer:marker atIndex:0];
     return marker;
 }
 
@@ -638,9 +630,10 @@ static BOOL RNSCOperationRunning;
     if (!target) return nil;
 
     CALayer *media = provider.mediaLayer;
-    BOOL sibling = media.superlayer != nil;
-    CALayer *host = sibling ? media.superlayer : target.layer;
-    CGRect rect = sibling ? media.bounds : target.bounds;
+    // Inherit the media layer's geometry and arbitrary mask, with existing controls above
+    // the replacement pixels. This also applies when the media layer backs the target view.
+    CALayer *host = media ?: target.layer;
+    CGRect rect = media ? media.bounds : target.bounds;
     if (CGRectIsEmpty(rect) || (media && (media.hidden || media.opacity <= 0.01)))
         return nil;
     CGImageRef frame = [provider newFrameImage];
@@ -671,10 +664,9 @@ static BOOL RNSCOperationRunning;
             pixels.transform = transform;
             [container addSublayer:pixels];
         }
-        if (sibling)
+        if (media)
         {
-            [self copyGeometry:media to:container];
-            [host insertSublayer:container above:media];
+            [host insertSublayer:container atIndex:0];
         }
         else
         {
@@ -687,24 +679,6 @@ static BOOL RNSCOperationRunning;
     {
         if (frame)
             CGImageRelease(frame);
-    }
-}
-
-+ (void)copyGeometry:(CALayer *)media to:(CALayer *)container
-{
-    container.bounds = media.bounds;
-    container.anchorPoint = media.anchorPoint;
-    container.anchorPointZ = media.anchorPointZ;
-    container.position = media.position;
-    container.transform = media.transform;
-    container.zPosition = media.zPosition;
-    container.opacity = media.opacity;
-    container.hidden = media.hidden;
-    if (media.masksToBounds)
-    {
-        container.cornerRadius = media.cornerRadius;
-        container.maskedCorners = media.maskedCorners;
-        container.cornerCurve = media.cornerCurve;
     }
 }
 

@@ -38,3 +38,24 @@ delegate behavior, transformed video pixels, or iPhone/tvOS media capture. Those
 fixture/device run. The separate native-core hardware results and remaining limits are described
 in [Failure recovery](../docs/FAILURE_RECOVERY.md); running these probes does not reproduce those
 hardware checks.
+
+## Physical media geometry readback
+
+`check-media-geometry.py` requires Pillow and the 14 raw PNG files from the controlled
+physical XR fixture (828×1792 pixels, two captures per style). The fixture has a
+400×240-point media host at (80,160), a cyan control at local (20,20,60,30), and pure
+red/green background quadrants. Styles are normal, 90/180-degree rotation, a 60-point
+rounded clip, 0.4 opacity, anchor (0.35,0.65), and a triangle joining (0,0), (400,0),
+(0,240). A second variant applies those styles to an internal media layer while its
+host/control remain fixed. Use the raw capture output, with no resizing or color edits.
+
+```sh
+python3 tests/check-media-geometry.py /path/to/backing-layer-images
+python3 tests/check-media-geometry.py --media-sublayer /path/to/internal-layer-images
+```
+
+Expected fixture colors independently check clipping, alpha and visible control order;
+all 14 images are checked for whole-black output. The original 3.1 fixture fails these
+checks, and the corrected fixture passes both structures. This script verifies supplied
+hardware output; it does not launch an app, reproduce a live camera session, or replace
+the broader device tests described in the linked validation notes.
