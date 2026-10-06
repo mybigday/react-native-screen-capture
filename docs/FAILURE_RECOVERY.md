@@ -59,7 +59,13 @@ release, outside-path protection, injected disk-full, recovery write, two cleanu
 symlink protection). An invalid screen produced the expected error, followed by eight
 successful native-core AV captures in the same process.
 
+The combined core candidate also completed a separate 600-capture signed iOS-on-Mac
+matrix. Controlled secondary-window visibility caused 60/120 whole-black baseline images
+and 0/120 candidate images. During 180 sustained AV captures per variant, the baseline
+lost media at the two remount instants; the candidate had no missing media region.
+This covers controlled visibility and remounts, not natural sleep/focus/display transitions.
+
 Still required: real camera delegate restoration, transformed media pixels, full React
-bridge teardown, physical tvOS/VLC and real multiple-window/display transitions. Memory
+bridge teardown, physical tvOS/VLC and natural lifecycle/display transitions. Memory
 fault injection and bounded capture runs do not prove the absence
 of all memory/resource leaks.
