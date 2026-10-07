@@ -31,7 +31,7 @@
     if (self) {
         _layer = layer;
         _targetView = targetView;
-        _identifier = [NSString stringWithFormat:@"samplebuffer:%p", layer];
+        _identifier = [NSString stringWithFormat:@"samplebuffer:%p:view:%p", layer, targetView];
         _lock = OS_UNFAIR_LOCK_INIT;
     }
     return self;
@@ -100,9 +100,8 @@
     CVPixelBufferRef buffer = _latest ? CVPixelBufferRetain(_latest) : NULL;
     os_unfair_lock_unlock(&_lock);
     if (!buffer) return NULL;
-    CGImageRef image = RNSCCreateImageFromPixelBuffer(buffer);
-    CVPixelBufferRelease(buffer);
-    return image;
+    @try { return RNSCCreateImageFromPixelBuffer(buffer); }
+    @finally { CVPixelBufferRelease(buffer); }
 }
 
 @end

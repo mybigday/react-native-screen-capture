@@ -28,6 +28,7 @@ export interface Spec extends TurboModule {
 
   /** Returns the number of files removed. */
   clearCache(): Promise<number>
+  releaseCapture(uri: string): Promise<boolean>
 
   startScreenshotDetection(): Promise<void>
   stopScreenshotDetection(): Promise<void>

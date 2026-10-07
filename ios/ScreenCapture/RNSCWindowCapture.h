@@ -30,6 +30,9 @@ NS_ASSUME_NONNULL_BEGIN
                        completion:(void (^)(UIImage *_Nullable image,
                                             NSError *_Nullable error))completion;
 
+/** Serialize capture and provider lifecycle across the asynchronous frame wait. */
++ (void)performSerially:(void (^)(dispatch_block_t done))operation;
+
 /** Visible windows of foreground-active scenes, back to front. */
 + (NSArray<UIWindow *> *)captureWindows;
 

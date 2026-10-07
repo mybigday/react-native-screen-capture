@@ -4,17 +4,46 @@
 //
 
 #import "ScreenCapture.h"
-#import "RNSCWindowCapture.h"
+#import "RNSCFileStore.h"
 #import "RNSCProviderRegistry.h"
+#import "RNSCWindowCapture.h"
+#include <limits.h>
+#import <math.h>
 
 #import <UIKit/UIKit.h>
 
-static NSString *const kCacheFolder = @"react-native-screen-capture";
+static BOOL RNSCCaptureInFlight;
+
+// Validate the actual rounded/clamped allocation, not its fractional precursor.
+static BOOL RNSCScaledPixelDimensions(double width, double height, double scale,
+                                     double *pixelWidth, double *pixelHeight)
+{
+    if (!isfinite(width) || !isfinite(height) || width <= 0 || height <= 0 ||
+        !isfinite(scale) || scale <= 0) return NO;
+    width = fmax(1.0, round(width * scale));
+    height = fmax(1.0, round(height * scale));
+    if (!isfinite(width) || !isfinite(height) || width > INT_MAX || height > INT_MAX ||
+        width * height > 64000000) return NO;
+    *pixelWidth = width;
+    *pixelHeight = height;
+    return YES;
+}
+
+static NSError *RNSCExceptionError(NSException *exception)
+{
+    return [NSError
+        errorWithDomain:@"com.fugood.screencapture"
+                   code:500
+               userInfo:@{NSLocalizedDescriptionKey : exception.reason ?: @"Capture failed"}];
+}
+
 static NSString *const kEventScreenshot = @"ScreenCapture";
 static NSString *const kErrorCapture = @"E_CAPTURE";
 static NSString *const kErrorUnsupported = @"E_UNSUPPORTED";
 
 @implementation ScreenCapture {
+    BOOL _captureInFlight;
+    BOOL _invalidated;
     BOOL _hasListeners;
     BOOL _observingScreenshots;
 }
@@ -43,12 +72,26 @@ RCT_EXPORT_MODULE()
 
 - (void)invalidate
 {
+    @synchronized(self)
+    {
+        _invalidated = YES;
+    }
     [self stopScreenshotObserver];
     // The registry is main-thread only: its timer lives on the main run loop and its provider
     // map is mutated during discovery. invalidate() runs on the module's queue.
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [RNSCProviderRegistry.sharedRegistry detachAll];
-    });
+    [RNSCWindowCapture performSerially:^(dispatch_block_t done) {
+        @try
+        {
+            [RNSCProviderRegistry.sharedRegistry detachAll];
+        }
+        @catch (NSException *exception)
+        { /* Registry retains failed cleanup ownership. */
+        }
+        @finally
+        {
+            done();
+        }
+    }];
     [super invalidate];
 }
 
@@ -76,25 +119,58 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
     NSString *screen = options[@"screen"] ?: @"all";
     BOOL markUnsupported = [options[@"markUnsupported"] boolValue];
 
-    [RNSCWindowCapture captureExcludingStatusBar:excludeStatusBar
-                                          screen:screen
-                                 markUnsupported:markUnsupported
-                                      completion:^(UIImage *image, NSError *error) {
-        if (!image) {
-            reject(kErrorCapture, error.localizedDescription ?: @"Capture failed", error);
-            return;
+    if (!isfinite(scale) || scale <= 0 || !isfinite(quality))
+    {
+        reject(kErrorCapture, @"scale must be finite and positive; quality must be finite", nil);
+        return;
+    }
+    NSString *admissionError = nil;
+    @synchronized(ScreenCapture.class)
+    {
+        if ([self isInvalidated])
+            admissionError = @"Module is shutting down";
+        else if (RNSCCaptureInFlight)
+            admissionError = @"A capture is already in flight";
+        else
+        {
+            _captureInFlight = YES;
+            RNSCCaptureInFlight = YES;
         }
-        // Scaling and encoding are pure pixel work; keep them off the main thread.
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            [self encodeImage:image
-                    extension:extension
-                      quality:quality
-                        scale:scale
-                includeBase64:includeBase64
-                      resolve:resolve
-                       reject:reject];
-        });
-    }];
+    }
+    if (admissionError)
+    {
+        reject([admissionError isEqual:@"A capture is already in flight"] ? @"E_CAPTURE_BUSY"
+                                                                          : kErrorCapture,
+               admissionError, nil);
+        return;
+    }
+
+    [RNSCWindowCapture
+        captureExcludingStatusBar:excludeStatusBar
+                           screen:screen
+                  markUnsupported:markUnsupported
+                       completion:^(UIImage *image, NSError *error) {
+                           if (!image || [self isInvalidated])
+                           {
+                               [self finishCapture];
+                               reject(kErrorCapture,
+                                      [self isInvalidated]
+                                          ? @"Module is shutting down"
+                                          : (error.localizedDescription ?: @"Capture failed"),
+                                      error);
+                               return;
+                           }
+                           // Encode off the main thread.
+                           dispatch_async(RNSCFileQueue(), ^{
+                               [self encodeImage:image
+                                       extension:extension
+                                         quality:quality
+                                           scale:scale
+                                   includeBase64:includeBase64
+                                         resolve:resolve
+                                          reject:reject];
+                           });
+                       }];
 }
 
 - (void)encodeImage:(UIImage *)image
@@ -106,53 +182,115 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
              reject:(RCTPromiseRejectBlock)reject
 {
     NSMutableDictionary *result = nil;
-    NSString *failure = nil;
-    @try {
-        UIImage *output = (scale > 0 && scale != 1.0) ? [self scaleImage:image by:scale] : image;
-
-        BOOL isJPEG = [extension isEqualToString:@"jpg"] || [extension isEqualToString:@"jpeg"];
-        NSData *data = isJPEG ? UIImageJPEGRepresentation(output, MAX(0.0, MIN(1.0, quality / 100.0)))
-                              : UIImagePNGRepresentation(output);
-        if (!data) {
-            failure = @"Could not encode the image";
-            return;
+    NSError *failure = nil;
+    NSString *path = nil;
+    @autoreleasepool
+    {
+        @try {
+            if ([self isInvalidated])
+                [NSException raise:@"CaptureCancelled" format:@"Module is shutting down"];
+            UIImage *output = scale != 1.0 ? [self scaleImage:image by:scale] : image;
+            BOOL isJPEG = [extension isEqualToString:@"jpg"] || [extension isEqualToString:@"jpeg"];
+            NSData *data = isJPEG ? UIImageJPEGRepresentation(output, MAX(0.0, MIN(1.0, quality / 100.0)))
+                                  : UIImagePNGRepresentation(output);
+            if (!data.length)
+            {
+                failure = [NSError
+                    errorWithDomain:@"com.fugood.screencapture"
+                               code:500
+                           userInfo:@{NSLocalizedDescriptionKey : @"Could not encode the image"}];
+            }
+            else
+            {
+                // Build metadata before publication to avoid orphan files.
+                result = [NSMutableDictionary dictionary];
+                CGImageRef cgImage = output.CGImage;
+                result[@"width"] =
+                    @(cgImage ? CGImageGetWidth(cgImage) : lround(output.size.width * output.scale));
+                result[@"height"] =
+                    @(cgImage ? CGImageGetHeight(cgImage) : lround(output.size.height * output.scale));
+                if (includeBase64)
+                    result[@"base64"] = [data base64EncodedStringWithOptions:0];
+                path = [[RNSCFileStore defaultStore] writeData:data
+                                                     extension:isJPEG ? @"jpg" : @"png"
+                                                         error:&failure];
+                if (path)
+                    result[@"uri"] = [NSURL fileURLWithPath:path].absoluteString;
+                else
+                    result = nil;
+                if ([self isInvalidated])
+                    [NSException raise:@"CaptureCancelled" format:@"Module is shutting down"];
+            }
+        } @catch (NSException *exception) {
+            result = nil;
+            failure = [NSError
+                errorWithDomain:@"com.fugood.screencapture"
+                           code:500
+                       userInfo:@{NSLocalizedDescriptionKey : exception.reason ?: @"Capture failed"}];
         }
-
-        NSString *path = [self writeData:data extension:isJPEG ? @"jpg" : @"png"];
-        if (!path) {
-            failure = @"Could not write the image to the cache directory";
-            return;
+        @try
+        {
+            if (!result && path)
+            {
+                NSError *cleanupError = nil;
+                @try
+                {
+                    [[RNSCFileStore defaultStore] releaseURI:[NSURL fileURLWithPath:path].absoluteString
+                                                       error:&cleanupError];
+                }
+                @catch (NSException *exception)
+                {
+                    cleanupError = RNSCExceptionError(exception);
+                }
+                if (cleanupError)
+                    failure =
+                        [NSError errorWithDomain:failure.domain
+                                            code:failure.code
+                                        userInfo:@{
+                                            NSLocalizedDescriptionKey : failure.localizedDescription,
+                                            NSUnderlyingErrorKey : cleanupError
+                                        }];
+            }
         }
-
-        result = [NSMutableDictionary dictionary];
-        result[@"uri"] = [@"file://" stringByAppendingString:path];
-        // From the CGImage, not size * scale: the renderer rounds fractional point sizes, so a
-        // scaled capture would otherwise report a non-integer width that disagrees with the
-        // file just written -- and with Android, which returns an exact pixel count.
-        CGImageRef cgImage = output.CGImage;
-        result[@"width"] = @(cgImage ? (NSInteger)CGImageGetWidth(cgImage)
-                                     : (NSInteger)lround(output.size.width * output.scale));
-        result[@"height"] = @(cgImage ? (NSInteger)CGImageGetHeight(cgImage)
-                                      : (NSInteger)lround(output.size.height * output.scale));
-        if (includeBase64) {
-            result[@"base64"] = [data base64EncodedStringWithOptions:0];
+        @finally
+        {
+            [self finishCapture];
         }
-    } @catch (NSException *exception) {
-        result = nil;
-        failure = exception.reason ?: @"Capture failed";
     }
-    // Outside the @try, as on the Android side: a throw out of settling must not come back
-    // through the @catch and settle the same Promise a second time.
-    if (result) {
+    // Drain temporaries before settlement can throw.
+    if (result)
         resolve(result);
-    } else {
-        reject(kErrorCapture, failure ?: @"Capture failed", nil);
+    else
+        reject(kErrorCapture, failure.localizedDescription ?: @"Capture failed", failure);
+}
+
+- (BOOL)isInvalidated
+{
+    @synchronized(self)
+    {
+        return _invalidated;
+    }
+}
+
+- (void)finishCapture
+{
+    @synchronized(ScreenCapture.class)
+    {
+        if (_captureInFlight)
+            RNSCCaptureInFlight = NO;
+        _captureInFlight = NO;
     }
 }
 
 - (UIImage *)scaleImage:(UIImage *)image by:(CGFloat)scale
 {
-    CGSize size = CGSizeMake(image.size.width * scale, image.size.height * scale);
+    double width = 0, height = 0;
+    if (!RNSCScaledPixelDimensions(image.size.width * image.scale,
+                                   image.size.height * image.scale, scale, &width, &height))
+    {
+        [NSException raise:@"CaptureDimensions" format:@"Scaled capture exceeds 64 megapixels"];
+    }
+    CGSize size = CGSizeMake(width / image.scale, height / image.scale);
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
     format.opaque = YES;
     format.scale = image.scale;
@@ -161,31 +299,6 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
     return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
         [image drawInRect:CGRectMake(0, 0, size.width, size.height)];
     }];
-}
-
-- (nullable NSString *)writeData:(NSData *)data extension:(NSString *)extension
-{
-    NSString *folder = [self cacheFolder];
-    if (!folder) return nil;
-    NSString *name = [NSString stringWithFormat:@"CAPTURE-%@.%@", NSUUID.UUID.UUIDString, extension];
-    NSString *path = [folder stringByAppendingPathComponent:name];
-    return [data writeToFile:path atomically:YES] ? path : nil;
-}
-
-- (nullable NSString *)cacheFolder
-{
-    NSString *caches =
-        NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
-    if (!caches) return nil;
-    NSString *folder = [caches stringByAppendingPathComponent:kCacheFolder];
-    NSFileManager *manager = NSFileManager.defaultManager;
-    if (![manager fileExistsAtPath:folder]) {
-        [manager createDirectoryAtPath:folder
-           withIntermediateDirectories:YES
-                            attributes:nil
-                                 error:NULL];
-    }
-    return folder;
 }
 
 #pragma mark - modes and permissions
@@ -229,27 +342,64 @@ RCT_EXPORT_METHOD(isModeAvailable:(NSString *)mode
 
 #pragma mark - frame providers
 
+- (void)performProviderOperation:(dispatch_block_t)operation
+                         resolve:(RCTPromiseResolveBlock)resolve
+                          reject:(RCTPromiseRejectBlock)reject
+{
+    [RNSCWindowCapture performSerially:^(dispatch_block_t done) {
+        NSError *error = nil;
+        @try
+        {
+            operation();
+        }
+        @catch (NSException *exception)
+        {
+            error = [NSError errorWithDomain:@"com.fugood.screencapture"
+                                        code:500
+                                    userInfo:@{
+                                        NSLocalizedDescriptionKey : exception.reason
+                                            ?: @"Provider operation failed"
+                                    }];
+        }
+        @finally
+        {
+            done();
+        }
+        if (error)
+            reject(kErrorCapture, error.localizedDescription, error);
+        else
+            resolve(nil);
+    }];
+}
+
 RCT_EXPORT_METHOD(warmUp:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        RNSCProviderRegistry *registry = RNSCProviderRegistry.sharedRegistry;
-        [registry attachedProvidersForWindows:[RNSCWindowCapture captureWindows]];
-        // attachedProvidersForWindows: cancels the idle timer; without re-arming it here a
-        // warmUp() that is never followed by a capture would keep the providers attached for
-        // the life of the app, which is not what the API documents.
-        [registry scheduleIdleDetach];
-        resolve(nil);
-    });
+    [self
+        performProviderOperation:^{
+            RNSCProviderRegistry *registry = RNSCProviderRegistry.sharedRegistry;
+            @try
+            {
+                [registry attachedProvidersForWindows:[RNSCWindowCapture captureWindows]];
+            }
+            @finally
+            {
+                [registry scheduleIdleDetach];
+            }
+        }
+                         resolve:resolve
+                          reject:reject];
 }
 
 RCT_EXPORT_METHOD(coolDown:(RCTPromiseResolveBlock)resolve
                     reject:(RCTPromiseRejectBlock)reject)
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [RNSCProviderRegistry.sharedRegistry detachAll];
-        resolve(nil);
-    });
+    [self
+        performProviderOperation:^{
+            [RNSCProviderRegistry.sharedRegistry detachAll];
+        }
+                         resolve:resolve
+                          reject:reject];
 }
 
 #pragma mark - misc
@@ -257,21 +407,49 @@ RCT_EXPORT_METHOD(coolDown:(RCTPromiseResolveBlock)resolve
 RCT_EXPORT_METHOD(clearCache:(RCTPromiseResolveBlock)resolve
                       reject:(RCTPromiseRejectBlock)reject)
 {
-    // The module declares no methodQueue, so on the new architecture this body runs on the JS
-    // thread. Listing the folder and unlinking one multi-megabyte file per capture is real
-    // syscall work; the Android side moves the same work to its encoder executor.
-    NSString *folder = [self cacheFolder];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSFileManager *manager = [[NSFileManager alloc] init];
+    dispatch_async(RNSCFileQueue(), ^{
+        NSError *error = nil;
         NSUInteger removed = 0;
-        if (folder) {
-            NSArray<NSString *> *names = [manager contentsOfDirectoryAtPath:folder error:NULL];
-            for (NSString *name in names) {
-                NSString *path = [folder stringByAppendingPathComponent:name];
-                if ([manager removeItemAtPath:path error:NULL]) removed++;
-            }
+        @try
+        {
+            if ([self isInvalidated])
+                [NSException raise:@"CaptureCancelled" format:@"Module is shutting down"];
+            removed = [[RNSCFileStore defaultStore] clear:&error];
         }
-        resolve(@(removed));
+        @catch (NSException *exception)
+        {
+            error = RNSCExceptionError(exception);
+        }
+        if (error)
+            reject(kErrorCapture,
+                   [NSString stringWithFormat:@"Cache cleanup failed after removing %lu files: %@",
+                                              (unsigned long)removed, error.localizedDescription],
+                   error);
+        else
+            resolve(@(removed));
+    });
+}
+
+RCT_EXPORT_METHOD(releaseCapture : (NSString *)uri resolve : (RCTPromiseResolveBlock)
+                      resolve reject : (RCTPromiseRejectBlock)reject)
+{
+    dispatch_async(RNSCFileQueue(), ^{
+        NSError *error = nil;
+        BOOL removed = NO;
+        @try
+        {
+            if ([self isInvalidated])
+                [NSException raise:@"CaptureCancelled" format:@"Module is shutting down"];
+            removed = [[RNSCFileStore defaultStore] releaseURI:uri error:&error];
+        }
+        @catch (NSException *exception)
+        {
+            error = RNSCExceptionError(exception);
+        }
+        if (error)
+            reject(kErrorCapture, error.localizedDescription, error);
+        else
+            resolve(@(removed));
     });
 }
 
@@ -315,31 +493,76 @@ RCT_EXPORT_METHOD(stopScreenshotDetection:(RCTPromiseResolveBlock)resolve
 RCT_EXPORT_METHOD(dumpHierarchy:(RCTPromiseResolveBlock)resolve
                          reject:(RCTPromiseRejectBlock)reject)
 {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSArray<UIWindow *> *windows = [RNSCWindowCapture captureWindows];
+    [RNSCWindowCapture performSerially:^(dispatch_block_t done) {
+        __block NSMutableString *out = nil;
+        NSArray<id<RNSCFrameProvider>> *providers = nil;
+        NSError *failure = nil;
         RNSCProviderRegistry *registry = RNSCProviderRegistry.sharedRegistry;
-        NSMutableString *out = [[registry describeWindows:windows] mutableCopy];
-
-        // Attaching is what tells us whether a matched component can actually hand over
-        // frames -- discovery finding a layer is not the same as the pipeline working.
-        NSArray<id<RNSCFrameProvider>> *providers = [registry attachedProvidersForWindows:windows];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [out appendString:@"\nFRAME PROVIDERS\n"];
-            if (providers.count == 0) {
-                [out appendString:@"  (none matched)\n"];
-            }
-            for (id<RNSCFrameProvider> provider in providers) {
-                [out appendFormat:@"  %@  hasFrame=%@  gravity=%@  target=%@\n",
-                    provider.identifier,
-                    provider.hasFrame ? @"YES" : @"no",
-                    provider.contentsGravity,
-                    NSStringFromClass(provider.targetView.class)];
-            }
+        @try
+        {
+            NSArray<UIWindow *> *windows = [RNSCWindowCapture captureWindows];
+            out = [[registry describeWindows:windows] mutableCopy];
+            providers = [registry attachedProvidersForWindows:windows];
+        }
+        @catch (NSException *exception)
+        {
+            failure = [NSError
+                errorWithDomain:@"com.fugood.screencapture"
+                           code:500
+                       userInfo:@{
+                           NSLocalizedDescriptionKey : exception.reason ?: @"Discovery failed"
+                       }];
+        }
+        if (failure)
+        {
             [registry scheduleIdleDetach];
-            resolve(out);
-        });
-    });
+            done();
+            reject(kErrorCapture, failure.localizedDescription, failure);
+            return;
+        }
+        dispatch_after(
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+            dispatch_get_main_queue(), ^{
+                NSError *error = nil;
+                @try
+                {
+                    [out appendString:@"\nFRAME PROVIDERS\n"];
+                    if (providers.count == 0)
+                        [out appendString:@"  (none matched)\n"];
+                    for (id<RNSCFrameProvider> provider in providers)
+                    {
+                        [out appendFormat:@"  %@  hasFrame=%@  gravity=%@  target=%@\n",
+                                          provider.identifier, provider.hasFrame ? @"YES" : @"no",
+                                          provider.contentsGravity,
+                                          NSStringFromClass(provider.targetView.class)];
+                    }
+                }
+                @catch (NSException *exception)
+                {
+                    error = [NSError errorWithDomain:@"com.fugood.screencapture"
+                                                code:500
+                                            userInfo:@{
+                                                NSLocalizedDescriptionKey : exception.reason
+                                                    ?: @"Provider diagnostic failed"
+                                            }];
+                }
+                @finally
+                {
+                    @try
+                    {
+                        [registry scheduleIdleDetach];
+                    }
+                    @finally
+                    {
+                        done();
+                    }
+                }
+                if (error)
+                    reject(kErrorCapture, error.localizedDescription, error);
+                else
+                    resolve(out);
+            });
+    }];
 }
 
 #pragma mark - TurboModule

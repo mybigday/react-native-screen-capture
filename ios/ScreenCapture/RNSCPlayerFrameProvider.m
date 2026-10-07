@@ -5,6 +5,9 @@
 
 #import "RNSCPlayerFrameProvider.h"
 #import <os/lock.h>
+#if __has_include(<AVKit/AVKit.h>)
+#import <AVKit/AVKit.h>
+#endif
 
 @implementation RNSCPlayerFrameProvider {
     // Weak: the registry keeps providers around for a few idle seconds after a capture, and a
@@ -14,6 +17,7 @@
     __weak UIView *_targetView;
     __weak CALayer *_mediaLayer;
     CALayerContentsGravity _gravity;
+    BOOL _hadMediaLayer;
 
     AVPlayerItemVideoOutput *_output;
     __weak AVPlayerItem *_observedItem;
@@ -36,11 +40,17 @@
         _player = player;
         _targetView = targetView;
         _mediaLayer = mediaLayer;
+        _hadMediaLayer = mediaLayer != nil;
         _gravity = gravity ?: kCAGravityResizeAspect;
-        _identifier = [NSString stringWithFormat:@"player:%p", player];
+        _identifier = [self.class identifierForPlayer:player view:targetView layer:mediaLayer];
         _lock = OS_UNFAIR_LOCK_INIT;
     }
     return self;
+}
+
++ (NSString *)identifierForPlayer:(AVPlayer *)player view:(UIView *)view layer:(CALayer *)layer
+{
+    return [NSString stringWithFormat:@"player:%p:view:%p:layer:%p", player, view, layer];
 }
 
 - (void)dealloc
@@ -53,8 +63,43 @@
 
 - (UIView *)targetView { return _targetView; }
 - (CALayer *)mediaLayer { return _mediaLayer; }
-- (BOOL)isAlive { return _targetView != nil && _player != nil; }
-- (CALayerContentsGravity)contentsGravity { return _gravity; }
+- (BOOL)isAlive
+{
+    if (!_targetView.window || !_player || (_hadMediaLayer && !_mediaLayer))
+        return NO;
+    if ([_mediaLayer isKindOfClass:AVPlayerLayer.class] &&
+        ((AVPlayerLayer *)_mediaLayer).player != _player)
+        return NO;
+    if (_mediaLayer && _mediaLayer != _targetView.layer)
+    {
+        CALayer *ancestor = _mediaLayer.superlayer;
+        while (ancestor && ancestor != _targetView.layer)
+            ancestor = ancestor.superlayer;
+        if (!ancestor)
+            return NO;
+    }
+#if __has_include(<AVKit/AVKit.h>)
+    if (!_hadMediaLayer && [_targetView.nextResponder isKindOfClass:AVPlayerViewController.class] &&
+        ((AVPlayerViewController *)_targetView.nextResponder).player != _player)
+        return NO;
+#endif
+    return YES;
+}
+- (CALayerContentsGravity)contentsGravity
+{
+    if ([_mediaLayer isKindOfClass:AVPlayerLayer.class])
+    {
+        return RNSCContentsGravityForVideoGravity(((AVPlayerLayer *)_mediaLayer).videoGravity);
+    }
+#if __has_include(<AVKit/AVKit.h>)
+    if (!_hadMediaLayer && [_targetView.nextResponder isKindOfClass:AVPlayerViewController.class])
+    {
+        return RNSCContentsGravityForVideoGravity(
+            ((AVPlayerViewController *)_targetView.nextResponder).videoGravity);
+    }
+#endif
+    return _gravity;
+}
 - (CATransform3D)contentsTransform { return CATransform3DIdentity; }
 
 - (void)attach
@@ -69,17 +114,22 @@
 
 - (void)detach
 {
-    if (!_attached) return;
-    _attached = NO;
-
-    [self detachOutputFromObservedItem];
-    _output = nil;
-
-    os_unfair_lock_lock(&_lock);
-    CVPixelBufferRef stale = _latest;
-    _latest = NULL;
-    os_unfair_lock_unlock(&_lock);
-    if (stale) CVPixelBufferRelease(stale);
+    if (!_attached && !_output) return;
+    @try
+    {
+        // Preserve ownership and retryability if AVFoundation refuses removal.
+        [self detachOutputFromObservedItem];
+        _output = nil;
+        _attached = NO;
+    }
+    @finally
+    {
+        os_unfair_lock_lock(&_lock);
+        CVPixelBufferRef stale = _latest;
+        _latest = NULL;
+        os_unfair_lock_unlock(&_lock);
+        if (stale) CVPixelBufferRelease(stale);
+    }
 }
 
 - (BOOL)hasFrame
@@ -98,9 +148,8 @@
     CVPixelBufferRef buffer = _latest ? CVPixelBufferRetain(_latest) : NULL;
     os_unfair_lock_unlock(&_lock);
     if (!buffer) return NULL;
-    CGImageRef image = RNSCCreateImageFromPixelBuffer(buffer);
-    CVPixelBufferRelease(buffer);
-    return image;
+    @try { return RNSCCreateImageFromPixelBuffer(buffer); }
+    @finally { CVPixelBufferRelease(buffer); }
 }
 
 #pragma mark - Internals
@@ -145,7 +194,8 @@
 {
     AVPlayer *player = _player;
     AVPlayerItem *item = player.currentItem;
-    if (item == _observedItem) return;
+    if (item == _observedItem && (!item || [item.outputs containsObject:_output]))
+        return;
 
     // Playlists swap the item out from under us; move the output across when they do.
     [self detachOutputFromObservedItem];

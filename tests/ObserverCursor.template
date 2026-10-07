@@ -1,0 +1,55 @@
+package com.fugood.screencapture;
+
+/** Injected Cursor exceptions, no MediaStore, query blocking, or Android Looper. */
+public final class ObserverCursorTest {
+    static int checks;
+    static void check(boolean condition, String message) {
+        checks++;
+        if (!condition) throw new AssertionError(message);
+    }
+    static final class Cursor {
+        boolean closed, failState, failClose;
+        int closes;
+        boolean isClosed() {
+            if (failState) throw new IllegalStateException("injected cursor state failure");
+            return closed;
+        }
+        void close() {
+            closes++;
+            if (failClose) throw new IllegalStateException("injected cursor close failure");
+            closed = true;
+        }
+    }
+    static final class Log {
+        static int warnings;
+        static int w(String tag, String message, Throwable error) { warnings++; return 0; }
+    }
+
+    /* PRODUCTION_CURSOR_CLOSE */
+
+    public static void main(String[] args) {
+        closeCursor(null);
+        Cursor healthy = new Cursor(); closeCursor(healthy); closeCursor(healthy);
+        check(healthy.closed && healthy.closes == 1, "healthy cursor not closed exactly once");
+        check(Log.warnings == 0, "healthy cleanup warned");
+        Cursor state = new Cursor(); state.failState = true;
+        Throwable escaped = null;
+        try { closeCursor(state); } catch (Throwable error) { escaped = error; }
+        check(escaped == null, "cursor-state exception escaped observer cleanup: " + escaped);
+        check(Log.warnings == 1 && state.closes == 0, "cursor-state failure was not observed");
+        Cursor close = new Cursor(); close.failClose = true;
+        try { closeCursor(close); } catch (Throwable error) { escaped = error; }
+        check(escaped == null, "cursor-close exception escaped observer cleanup");
+        check(Log.warnings == 2 && close.closes == 1, "close failure not observed once");
+
+        IllegalStateException primary = new IllegalStateException("query failure");
+        Throwable seen = null;
+        try {
+            try { throw primary; } finally { closeCursor(close); }
+        } catch (Throwable error) { seen = error; }
+        check(seen == primary, "cleanup replaced the primary query failure");
+        Cursor next = new Cursor(); closeCursor(next);
+        check(next.closed && next.closes == 1 && Log.warnings == 3, "subsequent cleanup did not work");
+        System.out.println("{\"checks\":" + checks + ",\"passed\":true,\"scope\":\"extracted production cursor cleanup; injected boundary exceptions, no Android device\"}");
+    }
+}
