@@ -79,7 +79,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                 }
             }
         });
-        // Shared worker expires when idle. Queued work checks this instance's invalidation.
+        // Queued work checks this instance's invalidation.
         super.invalidate();
     }
 
@@ -205,8 +205,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                     String suffix = format == Bitmap.CompressFormat.JPEG ? "jpg" : "png";
                     byte[] encoded = null;
                     if (includeBase64) {
-                        // Encode once and reuse the bytes for both the file and the string;
-                        // compressing twice doubles the cost of every base64 capture.
+                        // Reuse encoded bytes for the file and base64.
                         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                         if (!bitmap.compress(format, quality, buffer))
                             throw new IOException("Could not encode the image");
@@ -265,9 +264,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         try {
             encoder.execute(guarded);
         } catch (Throwable error) {
-            // Worker creation can fail after queue admission. Cancel before removing the wrapper:
-            // a concurrent worker may already have taken it, but cannot run cancelled image work.
-            // A worker that claimed it first owns bitmap cleanup and promise settlement instead.
+            // Cancel before removing queued work; a claimed worker owns cleanup and settlement.
             if (!claimed.compareAndSet(false, true)) return;
             encoder.remove(guarded);
             source.recycle();

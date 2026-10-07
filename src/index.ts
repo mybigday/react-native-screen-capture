@@ -74,17 +74,12 @@ export type Subscription = { remove(): void }
 
 const EVENT_SCREENSHOT = 'ScreenCapture'
 
-// Tracked here rather than asked of the emitter: `ScreenCapture` is a bare global device event,
-// so emitter.listenerCount() also sees 1.x-era DeviceEventEmitter listeners and any second copy
-// of this package -- which would keep native detection running after our last subscriber left.
-// A set rather than a counter, so a subscription removed twice cannot drive the count past
-// zero and stop detection under a listener that is still subscribed.
+// Track this module's subscriptions independently of other emitter users.
 const active = new Set<object>()
 let detectionStarted = false
 let detectionWork: Promise<void> = Promise.resolve()
 
-// Serialize starts/stops and read the current desired state after each native operation.
-// A failed start remains retryable when another subscriber arrives or the app resumes.
+// Serialize detection transitions; failed starts remain retryable.
 function reconcileDetection(): void {
   detectionWork = detectionWork.then(async () => {
     try {
@@ -107,8 +102,7 @@ const emitter = new NativeEventEmitter(
 
 let defaultMode: CaptureMode = 'auto'
 
-// Share only an outstanding probe. A service can disconnect while the app stays foreground,
-// so a resolved grant cannot stand in for the availability of later captures.
+// Share pending probes only; service availability can change while foreground.
 let accessibilityStatus: Promise<PermissionStatus> | null = null
 AppState.addEventListener('change', (state) => {
   if (state === 'active') {
@@ -149,9 +143,7 @@ export async function capture(options: CaptureOptions = {}): Promise<CaptureResu
     throw new Error('quality must be finite')
   }
   const mode = await resolveMode(options.mode ?? defaultMode)
-  // Spread first, defaults after: rebuilding the object key by key dropped everything this
-  // union does not name, which once turned an A/B test into two identical runs. Unknown keys
-  // are the native side's business, not this function's.
+  // Preserve unknown native options; explicit values override defaults.
   const result = await NativeScreenCapture.capture({
     excludeStatusBar: false,
     extension: 'png',

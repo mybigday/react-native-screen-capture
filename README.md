@@ -137,10 +137,8 @@ iOS only; no-ops elsewhere. See [Performance](#performance).
 
 Deletes completed captures in the module's cache directory. Resolves with the count. Listing or
 deletion failures reject with `E_CAPTURE`; the message includes how many files were removed.
-Encoding, settlement and cleanup are ordered through a shared worker.
 
-Call this only after all consumers finish. It also deletes previously returned files that may
-still be uploading or displayed. Use `releaseCapture` for independent concurrent consumers.
+Wait for all consumers before clearing the cache; use `releaseCapture` for individual results.
 
 Android now uses `cache/react-native-screen-capture/` rather than the host cache root. Existing
 3.1 files in the root are retained: the previous `CAPTURE` prefix alone cannot establish ownership.

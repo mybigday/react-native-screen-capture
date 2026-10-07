@@ -82,8 +82,7 @@ dispatch_queue_t RNSCFileQueue(void)
     NSString *path = [_directory stringByAppendingPathComponent:name];
     if ([data writeToFile:path options:NSDataWritingAtomic error:error])
         return path;
-    // The OS may purge a cache directory between creation and write. Retry that case once;
-    // permissions and disk-full errors must reach the caller unchanged.
+    // Retry cache purge once; preserve other write errors.
     if (error && [(*error).domain isEqual:NSCocoaErrorDomain] &&
         (*error).code == NSFileNoSuchFileError)
     {
@@ -104,9 +103,7 @@ dispatch_queue_t RNSCFileQueue(void)
     NSString *path = url.path.stringByStandardizingPath;
     NSString *parent = path.stringByDeletingLastPathComponent.stringByStandardizingPath;
     if (!url.isFileURL || (url.host.length && ![url.host isEqual:@"localhost"]) ||
-        // Foundation can standardize an app-container alias differently after the cache
-        // directory is created, or after a file is deleted. Normalize the parent separately
-        // so releasing an already-missing file still compares two existing directories.
+        // Normalize existing parents independently of the file's presence.
         ![parent isEqual:_directory.stringByStandardizingPath] ||
         ![self ownsName:path.lastPathComponent])
     {

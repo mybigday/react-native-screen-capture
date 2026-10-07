@@ -126,9 +126,7 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
                                                        }
                                                        @catch (NSException *exception)
                                                        {
-                                                           // Keep failed providers owned for a
-                                                           // later explicit cleanup/discovery
-                                                           // retry.
+                                                           // Preserve ownership for a later cleanup retry.
                                                        }
                                                    }];
 }
@@ -420,9 +418,7 @@ typedef NS_ENUM(NSInteger, RNSCMediaLayerKind) {
                 }
                 return;
             case RNSCMediaLayerKindMetal:
-                // Listed so nobody goes hunting for a provider that is not needed: measured on
-                // an iPhone XR, drawViewHierarchyInRect: renders Metal content itself. What it
-                // cannot reach is AVFoundation's hardware video planes, not the GPU generally.
+                // Hierarchy drawing captures in-process Metal content; no provider is needed.
                 [out appendString:
                     @"  <- CAMetalLayer, captured directly by the hierarchy draw"];
                 return;

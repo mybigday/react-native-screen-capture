@@ -154,11 +154,7 @@ final class WindowCapture {
         });
     }
 
-    /**
-     * Issues every {@link PixelCopy} request at once and installs each successful result as an
-     * overlay. The previous implementation did this serially with a 5s latch per view, so N
-     * SurfaceViews had a worst case of N x 5s.
-     */
+    /** Copy surfaces concurrently and install successful results as overlays. */
     private static void copySurfaceViews(final List<SurfaceView> views, final List<Overlay> overlays,
                                          final boolean markUnsupported, final Runnable done) {
         final AtomicInteger pending = new AtomicInteger(views.size());
@@ -167,8 +163,7 @@ final class WindowCapture {
             @Override
             public void run() {
                 if (!finished.compareAndSet(false, true)) return;
-                // Drop the deadline below so it stops holding the capture closure -- and the
-                // activity behind it -- alive on the normal path.
+                // Release the deadline's capture/activity references.
                 UI.removeCallbacks(this);
                 done.run();
             }
@@ -180,18 +175,7 @@ final class WindowCapture {
             }
         };
 
-        // Posted before the loop, not after: a loop that finishes synchronously -- every view
-        // skipped or failing to allocate -- would otherwise run `finish` inline, remove nothing,
-        // and then have this deadline posted behind it, pinning the whole capture closure for
-        // another 1.5s after the Promise had already settled.
-        //
-        // The framework can also accept a request and then drop it -- a surface destroyed
-        // mid-capture, for instance -- without ever calling the listener. Without a deadline
-        // that would hang the capture forever with frozen overlays left on screen.
-        // Reserve after constructing the bookkeeping, before allocating/submitting any bitmap.
-        // An oversized aggregate or exhausted process budget fails the whole capture.
-        // A native request which never calls back keeps its lease across captures. Exhaustion
-        // fails closed: a deadline cannot make a destination safe to recycle or reuse.
+        // Schedule before any synchronous completion; timeout retains native bitmap leases.
         final PixelCopyBudget.Lease[] leases = reserveSurfaceCopies(views);
         try {
             UI.postDelayed(finish, SURFACE_COPY_TIMEOUT_MS);
@@ -212,8 +196,6 @@ final class WindowCapture {
             }
             Bitmap allocated = null;
             try {
-                // Inside the try: allocating a full-size ARGB_8888 buffer for a large surface is
-                // itself a place this can fail.
                 CaptureFiles.scaledSize(width, height, 1);
                 allocated = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
                 final Bitmap bitmap = allocated;
@@ -238,8 +220,7 @@ final class WindowCapture {
                                 overlay = new Overlay(view, drawable, bitmap);
                             }
                             if (overlay != null) {
-                                // Track before installation, including add() throwing after it
-                                // has mutated either collection. Rollback removes both identities.
+                                // Track before add() so partial installation can be rolled back.
                                 overlays.add(overlay);
                                 view.getOverlay().add(overlay.drawable);
                             }
@@ -368,10 +349,7 @@ final class WindowCapture {
             final Bitmap out;
             Bitmap allocated = null;
             final Runnable deadline;
-            // Same hazard as the two hops before it: a window whose surface is destroyed
-            // between the request and the copy leaves the listener uncalled, and this listener
-            // is the only thing that takes the overlays back off the SurfaceViews. Without a
-            // deadline the user is left looking at frozen stills over live video.
+
             try {
                 allocated = Bitmap.createBitmap(width, outHeight, Bitmap.Config.ARGB_8888);
                 out = allocated;
@@ -388,15 +366,13 @@ final class WindowCapture {
                 throw failure;
             }
             try {
-                // Schedule before native submission so a scheduling failure cannot orphan a
-                // native-owned destination. The deadline deliberately keeps its lease alive.
+                // Schedule before native submission; timeout retains the lease.
                 UI.postDelayed(deadline, WINDOW_COPY_TIMEOUT_MS);
                 PixelCopy.request(window, new Rect(0, top, width, height), out,
                     new PixelCopy.OnPixelCopyFinishedListener() {
                         @Override
                         public void onPixelCopyFinished(int copyResult) {
-                            // Claim completion before transferring bitmap ownership. A duplicate
-                            // callback must not recycle an overlay/encoder-owned result.
+                            // Claim completion before transferring bitmap ownership.
                             if (!lease.release()) return;
                             UI.removeCallbacks(deadline);
                             removeOverlays(overlays);
@@ -451,8 +427,7 @@ final class WindowCapture {
             overlay.view.getOverlay().remove(overlay.drawable);
         } catch (Throwable failure) {
             Log.w("ScreenCapture", "Could not remove capture overlay", failure);
-            // A transient removal failure must not leave a drawable behind. Retry at most once;
-            // cleanup must still finish and settle if the platform keeps rejecting removal.
+            // Bound cleanup retries so capture still settles if removal keeps failing.
             try {
                 overlay.view.getOverlay().remove(overlay.drawable);
             } catch (Throwable retryFailure) {

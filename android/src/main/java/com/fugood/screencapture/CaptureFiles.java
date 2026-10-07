@@ -45,8 +45,7 @@ final class CaptureFiles {
         try {
             pendingKey = requiredPathKey(pending);
             checkPathKey(directory, directoryKey);
-            // The newly created pending file is empty. Do not truncate a replacement inode
-            // before the opened descriptor has passed its identity checks.
+            // Append avoids truncating a substituted inode before descriptor validation.
             try (FileOutputStream output = new FileOutputStream(pending, true)) {
                 if (identity != null) {
                     Object opened = identity.openedKey(output, pending);
@@ -58,8 +57,7 @@ final class CaptureFiles {
                 checkPathKey(pending, pendingKey);
                 writer.write(output);
                 output.flush();
-                // Keep the descriptor open through validation and rename. These identity checks
-                // reject controlled purge/substitution; they are not atomic with arbitrary host IO.
+                // Keep the descriptor open through rename; path checks cannot exclude all host races.
                 checkPathKey(directory, directoryKey);
                 checkPathKey(pending, pendingKey);
                 if (pending.length() == 0)

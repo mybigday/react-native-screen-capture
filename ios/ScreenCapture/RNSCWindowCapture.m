@@ -200,9 +200,7 @@ static BOOL RNSCOperationRunning;
                                    unchanged = unchanged && provider.isAlive;
                                if (unchanged)
                                {
-                                   // Discovery can change inside identical windows (remount, new
-                                   // media layer/item). At the end of the wait it is safe to prune;
-                                   // retry instead of drawing stale providers.
+                                   // Revalidate providers after waiting, even when windows are unchanged.
                                    NSArray *currentProviders =
                                        [registry attachedProvidersForWindows:allWindows];
                                    unchanged = [providers isEqual:currentProviders];
@@ -229,12 +227,9 @@ static BOOL RNSCOperationRunning;
                                NSMutableArray<UIImage *> *perScreen = [NSMutableArray array];
                                for (NSArray<UIWindow *> *group in groups)
                                {
-                                   // The status bar only exists on the main screen, so only the
-                                   // first group is cropped.
+                                   // Crop the status bar only on the main screen.
                                    BOOL crop = excludeStatusBar && group == groups.firstObject;
-                                   // Only the providers on this screen: installing a placeholder
-                                   // into another screen's layer tree, once per group, is wasted
-                                   // frame pulls and needless churn.
+
                                    NSMutableArray<id<RNSCFrameProvider>> *onScreen =
                                        [NSMutableArray array];
                                    for (id<RNSCFrameProvider> provider in providers)
@@ -519,8 +514,6 @@ static BOOL RNSCOperationRunning;
             }
             if (markUnsupported)
             {
-                // Layers we can see but cannot read on this OS. Marked through the same insertion
-                // point as the placeholders, so anything drawn over them still covers the label.
                 for (RNSCUnreachableLayer *item in
                      [RNSCProviderRegistry.sharedRegistry unreachableLayersForWindows:windows])
                 {
@@ -542,8 +535,7 @@ static BOOL RNSCOperationRunning;
 
     UIGraphicsImageRenderer *renderer =
         [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size format:format];
-    // Transparent system overlays must not flatten the already-drawn primary window to black.
-    // Preserve the primary draw failure signal independently of renderer opacity.
+    // Preserve underlying content through transparent overlays.
     __block BOOL drawSucceeded = YES;
     image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
         for (UIWindow *window in windows)
@@ -643,8 +635,7 @@ static BOOL RNSCOperationRunning;
 
 + (void)insertReplacementLayer:(CALayer *)replacement inMediaLayer:(CALayer *)media
 {
-    // Array order only breaks ties in zPosition. Keep even negative-z controls above
-    // replacement pixels, without changing their geometry or relative ordering.
+    // Match the lowest child zPosition; index zero keeps tied controls above the pixels.
     CGFloat lowest = 0;
     for (CALayer *child in media.sublayers)
         lowest = MIN(lowest, child.zPosition);
@@ -659,8 +650,7 @@ static BOOL RNSCOperationRunning;
     if (!target) return nil;
 
     CALayer *media = provider.mediaLayer;
-    // Inherit the media layer's geometry and arbitrary mask, with existing controls above
-    // the replacement pixels. This also applies when the media layer backs the target view.
+    // Insert inside the media layer to inherit its geometry and mask.
     CALayer *host = media ?: target.layer;
     CGRect rect = media ? media.bounds : target.bounds;
     if (CGRectIsEmpty(rect) || (media && (media.hidden || media.opacity <= 0.01)))

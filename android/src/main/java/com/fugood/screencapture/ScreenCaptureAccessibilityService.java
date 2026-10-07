@@ -222,8 +222,7 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                 }
                 takeScreenshot(service, displays[index], 1, (bitmap, error) -> accept(index, bitmap, error));
             } catch (Throwable failure) {
-                // A downstream callback may already have handed the bitmap to the encoder before
-                // throwing. It owns cleanup from that point; never recycle or settle again here.
+                // Cleanup transfers to the callback before invocation, even if it throws.
                 if (delivered.get()) throw failure;
                 recycle(output);
                 fail(String.valueOf(failure.getMessage()));
@@ -370,8 +369,7 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                     display, CAPTURE_EXECUTOR, new AccessibilityService.TakeScreenshotCallback() {
                         @Override
                         public void onSuccess(AccessibilityService.ScreenshotResult result) {
-                            // Claim before copying. Timeout cannot release admission during a large
-                            // copy.
+                            // Hold admission until the buffer copy finishes.
                             boolean claimed = terminal.compareAndSet(false, true);
                             if (claimed)
                                 cancelTimers();

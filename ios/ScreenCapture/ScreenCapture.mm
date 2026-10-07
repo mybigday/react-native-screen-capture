@@ -160,8 +160,7 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
                                       error);
                                return;
                            }
-                           // Scaling and encoding are pure pixel work; keep them off the main
-                           // thread.
+                           // Encode off the main thread.
                            dispatch_async(RNSCFileQueue(), ^{
                                [self encodeImage:image
                                        extension:extension
@@ -203,8 +202,7 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
             }
             else
             {
-                // Construct metadata before publishing: a base64/allocation failure cannot orphan a
-                // file.
+                // Build metadata before publication to avoid orphan files.
                 result = [NSMutableDictionary dictionary];
                 CGImageRef cgImage = output.CGImage;
                 result[@"width"] =
@@ -259,7 +257,7 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
             [self finishCapture];
         }
     }
-    // Drain request temporaries before a callback can throw; settlement never retries.
+    // Drain temporaries before settlement can throw.
     if (result)
         resolve(result);
     else
@@ -287,7 +285,6 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
 - (UIImage *)scaleImage:(UIImage *)image by:(CGFloat)scale
 {
     double width = 0, height = 0;
-    // Cap the actual derived pixel dimensions at 64 megapixels.
     if (!RNSCScaledPixelDimensions(image.size.width * image.scale,
                                    image.size.height * image.scale, scale, &width, &height))
     {

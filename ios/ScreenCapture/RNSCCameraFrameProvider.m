@@ -86,8 +86,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
         _session = session;
         _streamIdentity = RNSCVideoStreamIdentity(previewLayer.connection);
         _multiCam = [session isKindOfClass:AVCaptureMultiCamSession.class];
-        // The preview graph can change during construction. Bind identity to the same
-        // session/stream snapshot used for output selection, rather than reading it again.
+        // Use the same connection snapshot for identity and output selection.
         _identifier = [NSString stringWithFormat:@"camera:%p:stream:%@", session, _streamIdentity];
         _queue = dispatch_queue_create("com.fugood.screencapture.camera", DISPATCH_QUEUE_SERIAL);
         _lock = OS_UNFAIR_LOCK_INIT;
@@ -121,7 +120,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
 
 - (BOOL)matchesConnection:(AVCaptureConnection *)connection
 {
-    // Runs on the host's capture queue too; do not depend on its autorelease drain policy.
+    // Drain temporaries independently of the host capture queue.
     @autoreleasepool
     {
         NSString *identity = RNSCVideoStreamIdentity(connection);
@@ -143,8 +142,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
         return YES;
     }
     if (!output.connections.count) return NO;
-    // An output carrying multiple streams cannot have separate delegate wrappers removed
-    // independently. Borrow only an output whose connections all belong to this reader.
+    // Borrow only single-stream outputs so delegate restoration remains independent.
     for (AVCaptureConnection *connection in output.connections)
         if (![self matchesConnection:connection]) return NO;
     return YES;
@@ -153,9 +151,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
 - (BOOL)canCreateOutput
 {
     if (!_multiCam && _streamIdentity.length) return YES;
-    // MultiCam routing requires explicit host connections. An unidentified ordinary preview
-    // also must not compete with a reader for an identified stream. Only the inputless,
-    // unconnected synthetic fallback may create an output without a stream identity.
+    // MultiCam requires explicit connections; only inputless synthetic sessions may omit them.
     if (_streamIdentity.length || _session.inputs.count) return NO;
     for (AVCaptureOutput *output in _session.outputs)
         for (AVCaptureConnection *connection in output.connections)
@@ -211,10 +207,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     output.videoSettings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
     };
-    // A session at its output limit will not take another one. A later discovery can retry
-    // if configuration changes. hasFrame stays NO, so no placeholder is installed and the preview
-    // region falls back to whatever drawViewHierarchyInRect gives -- which dumpHierarchy
-    // reports honestly as a matched component with hasFrame=no.
+    // Refused attachment stays retryable and returns no frame.
     if (![session canAddOutput:output]) {
         _attachRefused = YES;
         return;
@@ -294,8 +287,7 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     AVCaptureVideoDataOutput *owned = _ownedOutput;
     id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = _previousDelegate;
     dispatch_queue_t previousQueue = _previousQueue;
-    // Refused attempts have no reader to invalidate. Repeated discovery must keep their
-    // generation stable so capture can deliver its no-frame fallback.
+    // Refused attachment must not invalidate no-frame readiness.
     if (_attached)
         _attachmentGeneration++;
     _attached = NO;

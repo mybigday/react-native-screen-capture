@@ -7,18 +7,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/**
- * Frames for anything driving an `AVPlayer`, whether it is presented through an
- * `AVPlayerLayer` or an `AVPlayerViewController`.
- *
- * We discover the public `AVPlayer`, which is reachable through public properties on both
- * (`AVPlayerLayer.player`, `AVPlayerViewController.player`), rather than the private layer
- * class `AVPlayerViewController` happens to use today. That covers react-native-video,
- * expo-video and expo-av, and survives Apple changing their internals.
- *
- * FairPlay-protected content still comes out black: those frames never leave the secure path,
- * so `AVPlayerItemVideoOutput` returns nothing. That is not fixable from an app.
- */
+/** Frames from public AVPlayer properties; protected playback may return no frame. */
 @interface RNSCPlayerFrameProvider : NSObject <RNSCFrameProvider>
 
 - (nullable instancetype)initWithPlayer:(AVPlayer *)player

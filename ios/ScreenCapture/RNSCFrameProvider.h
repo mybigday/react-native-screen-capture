@@ -9,20 +9,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/**
- * Supplies the current frame of a media component that Core Graphics cannot render.
- *
- * `drawViewHierarchyInRect:` cannot see AVFoundation's video planes -- AVPlayerLayer,
- * AVCaptureVideoPreviewLayer, AVSampleBufferDisplayLayer -- which come out black on device
- * (they render fine in the Simulator, which is what makes this look like it works). The only
- * public way around it is to pull the frame out of the framework that owns it, which is what
- * implementations of this protocol do.
- *
- * It is specifically those planes, not GPU rendering in general. GPU content the app draws
- * itself is captured by the hierarchy draw and needs no provider: `CAMetalLayer`
- * (react-native-skia, react-native-wgpu, WebRTC's Metal view) and `CAEAGLLayer` (OpenGL ES,
- * which is what VLC's iOS output renders into) were both measured on device.
- */
+/** Supplies AVFoundation frames unavailable to hierarchy drawing on hardware. */
 @protocol RNSCFrameProvider <NSObject>
 
 /** The view that hosts the media layer. Weak, because the tree changes under us. */
@@ -37,12 +24,7 @@ NS_ASSUME_NONNULL_BEGIN
 /** Still worth keeping around? Providers whose target view is gone are dropped. */
 @property (nonatomic, readonly, getter=isAlive) BOOL alive;
 
-/**
- * Hook into the underlying pipeline. Idempotent.
- *
- * Attaching is not free -- an AVPlayerItemVideoOutput makes the decoder emit an extra
- * app-readable copy -- so the registry detaches everything again after a few idle seconds.
- */
+/** Attach idempotently; the registry releases idle decoder hooks. */
 - (void)attach;
 - (void)detach;
 
