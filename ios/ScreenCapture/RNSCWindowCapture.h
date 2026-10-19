@@ -7,6 +7,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/** Largest bitmap, single or stitched, any capture path may allocate. */
+static const double RNSCMaxCapturePixels = 64000000;
+
 @interface RNSCWindowCapture : NSObject
 
 /**
@@ -29,6 +32,9 @@ NS_ASSUME_NONNULL_BEGIN
                   markUnsupported:(BOOL)markUnsupported
                        completion:(void (^)(UIImage *_Nullable image,
                                             NSError *_Nullable error))completion;
+
+/** Serialize capture and provider lifecycle across the asynchronous frame wait. */
++ (void)performSerially:(void (^)(dispatch_block_t done))operation;
 
 /** Visible windows of foreground-active scenes, back to front. */
 + (NSArray<UIWindow *> *)captureWindows;

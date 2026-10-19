@@ -14,6 +14,22 @@
 @interface RNSCCameraFrameProvider () <AVCaptureVideoDataOutputSampleBufferDelegate>
 @end
 
+/** Port objects identify the stream; names/device positions can be shared by different inputs. */
+static NSString *RNSCVideoStreamIdentity(AVCaptureConnection *connection)
+{
+    NSMutableArray<NSString *> *ports = [NSMutableArray array];
+    for (AVCaptureInputPort *port in connection.inputPorts)
+    {
+        if ([port.mediaType isEqualToString:AVMediaTypeVideo])
+        {
+            NSString *identity = [NSString stringWithFormat:@"%p", port];
+            if (![ports containsObject:identity]) [ports addObject:identity];
+        }
+    }
+    [ports sortUsingSelector:@selector(compare:)];
+    return [ports componentsJoinedByString:@","];
+}
+
 /**
  * The pre-iOS-17 spelling of videoRotationAngle, in the same degrees so the two paths can be
  * compared the same way. Only the difference between two connections is used, so all that
@@ -35,6 +51,8 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     __weak AVCaptureVideoPreviewLayer *_previewLayer;
     __weak UIView *_targetView;
     __weak AVCaptureSession *_session;
+    NSString *_streamIdentity;
+    BOOL _multiCam;
 
     /** An output we added ourselves and therefore must remove again. */
     AVCaptureVideoDataOutput *_ownedOutput;
@@ -47,7 +65,9 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     os_unfair_lock _lock;
     CVPixelBufferRef _latest;
     BOOL _attached;
-    /** Set when the session refused another output, so we stop re-probing it every capture. */
+    NSUInteger _presentations;
+    NSUInteger _attachmentGeneration;
+    /** The last discovery could not obtain an output for this stream. */
     BOOL _attachRefused;
 }
 
@@ -64,7 +84,10 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
         _previewLayer = previewLayer;
         _targetView = targetView;
         _session = session;
-        _identifier = [NSString stringWithFormat:@"camera:%p", session];
+        _streamIdentity = RNSCVideoStreamIdentity(previewLayer.connection);
+        _multiCam = [session isKindOfClass:AVCaptureMultiCamSession.class];
+        // Use the same connection snapshot for identity and output selection.
+        _identifier = [NSString stringWithFormat:@"camera:%p:stream:%@", session, _streamIdentity];
         _queue = dispatch_queue_create("com.fugood.screencapture.camera", DISPATCH_QUEUE_SERIAL);
         _lock = OS_UNFAIR_LOCK_INIT;
     }
@@ -83,15 +106,75 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
 - (CALayer *)mediaLayer { return _previewLayer; }
 - (BOOL)isAlive { return _targetView != nil && _previewLayer != nil && _session != nil; }
 
++ (NSString *)sourceIdentifierForPreview:(AVCaptureVideoPreviewLayer *)preview
+{
+    return [NSString stringWithFormat:@"camera:%p:stream:%@", preview.session,
+                                      RNSCVideoStreamIdentity(preview.connection)];
+}
+
+- (BOOL)matchesPreview:(AVCaptureVideoPreviewLayer *)preview
+{
+    return preview.session != nil && _session == preview.session &&
+           [_identifier isEqualToString:[self.class sourceIdentifierForPreview:preview]];
+}
+
+- (BOOL)matchesConnection:(AVCaptureConnection *)connection
+{
+    // Drain temporaries independently of the host capture queue.
+    @autoreleasepool
+    {
+        NSString *identity = RNSCVideoStreamIdentity(connection);
+        if (_streamIdentity.length)
+            return [_streamIdentity isEqualToString:identity];
+        // An unidentified reader is only the inputless/unconnected synthetic fallback.
+        return _session.inputs.count == 0 && identity.length == 0;
+    }
+}
+
+- (BOOL)matchesOutput:(AVCaptureVideoDataOutput *)output
+{
+    if (!output) return NO;
+    if (!_streamIdentity.length)
+    {
+        if (_session.inputs.count) return NO;
+        for (AVCaptureConnection *connection in output.connections)
+            if (RNSCVideoStreamIdentity(connection).length) return NO;
+        return YES;
+    }
+    if (!output.connections.count) return NO;
+    // Borrow only single-stream outputs so delegate restoration remains independent.
+    for (AVCaptureConnection *connection in output.connections)
+        if (![self matchesConnection:connection]) return NO;
+    return YES;
+}
+
+- (BOOL)canCreateOutput
+{
+    if (!_multiCam && _streamIdentity.length) return YES;
+    // MultiCam requires explicit connections; only inputless synthetic sessions may omit them.
+    if (_streamIdentity.length || _session.inputs.count) return NO;
+    for (AVCaptureOutput *output in _session.outputs)
+        for (AVCaptureConnection *connection in output.connections)
+            if (RNSCVideoStreamIdentity(connection).length) return NO;
+    return YES;
+}
+
 - (void)attach
 {
-    if (_attached || _attachRefused) return;
+    AVCaptureVideoDataOutput *active = _ownedOutput ?: _borrowedOutput;
+    if (_attached && [_session.outputs containsObject:active] &&
+        active.sampleBufferDelegate == self && [self matchesOutput:active])
+        return;
+    if (_attached || active)
+        [self detach];
+    _attachRefused = NO;
     AVCaptureSession *session = _session;
     if (!session) return;
 
     AVCaptureVideoDataOutput *existing = nil;
     for (AVCaptureOutput *output in session.outputs) {
-        if ([output isKindOfClass:AVCaptureVideoDataOutput.class]) {
+        if ([output isKindOfClass:AVCaptureVideoDataOutput.class] &&
+            [self matchesOutput:(AVCaptureVideoDataOutput *)output]) {
             existing = (AVCaptureVideoDataOutput *)output;
             break;
         }
@@ -106,82 +189,153 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
         _borrowedOutput = existing;
         _previousDelegate = existing.sampleBufferDelegate;
         _previousQueue = previousQueue;
+        _attached = YES;
+        _attachmentGeneration++;
         os_unfair_lock_unlock(&_lock);
         [existing setSampleBufferDelegate:self queue:previousQueue ?: _queue];
-        _attached = YES;
         return;
     }
 
+    if (![self canCreateOutput])
+    {
+        _attachRefused = YES;
+        return;
+    }
     AVCaptureVideoDataOutput *output = [[AVCaptureVideoDataOutput alloc] init];
     // Never hold on to more than the one frame we keep below.
     output.alwaysDiscardsLateVideoFrames = YES;
     output.videoSettings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
     };
-    // A session at its output limit will not take another one, and will not start to later in
-    // this session's life. hasFrame stays NO, so no placeholder is installed and the preview
-    // region falls back to whatever drawViewHierarchyInRect gives -- which dumpHierarchy
-    // reports honestly as a matched component with hasFrame=no.
+    // Refused attachment stays retryable and returns no frame.
     if (![session canAddOutput:output]) {
         _attachRefused = YES;
         return;
     }
 
-    [session beginConfiguration];
-    [session addOutput:output];
-    [session commitConfiguration];
-    if (![session.outputs containsObject:output]) {
-        _attachRefused = YES;
-        return;
-    }
-
+    // Record ownership before configuration: even a throwing commit must remain recoverable.
+    os_unfair_lock_lock(&_lock);
     _ownedOutput = output;
-    [output setSampleBufferDelegate:self queue:_queue];
+    os_unfair_lock_unlock(&_lock);
+    @try
+    {
+        [session beginConfiguration];
+        @try
+        {
+            [session addOutput:output];
+        }
+        @finally
+        {
+            [session commitConfiguration];
+        }
+        if (![session.outputs containsObject:output] || ![self matchesOutput:output])
+        {
+            [self detach];
+            _attachRefused = YES;
+            return;
+        }
+    }
+    @catch (NSException *exception)
+    {
+        @try
+        {
+            [self detach];
+        }
+        @catch (NSException *cleanup)
+        { /* Keep ownership for retry. */
+        }
+        @throw exception;
+    }
+    os_unfair_lock_lock(&_lock);
     _attached = YES;
+    _attachmentGeneration++;
+    os_unfair_lock_unlock(&_lock);
+    [output setSampleBufferDelegate:self queue:_queue];
+}
+
+- (NSUInteger)attachmentGeneration { return _attachmentGeneration; }
+
+- (BOOL)matchesSession:(AVCaptureSession *)session
+{
+    return session != nil && _session == session;
+}
+
+- (void)retainPresentation
+{
+    _presentations++;
+    [self attach];
+}
+
+- (void)releasePresentation
+{
+    if (_presentations)
+        _presentations--;
+    if (_presentations == 0)
+        [self detach];
+}
+
+- (void)releasePresentationIfIdle
+{
+    if (_presentations == 0)
+        [self detach];
 }
 
 - (void)detach
 {
-    if (!_attached) return;
+    os_unfair_lock_lock(&_lock);
+    AVCaptureVideoDataOutput *borrowed = _borrowedOutput;
+    AVCaptureVideoDataOutput *owned = _ownedOutput;
+    id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = _previousDelegate;
+    dispatch_queue_t previousQueue = _previousQueue;
+    // Refused attachment must not invalidate no-frame readiness.
+    if (_attached)
+        _attachmentGeneration++;
     _attached = NO;
 
-    if (_borrowedOutput) {
-        // Only put back what we took. If the host swapped its own delegate in while we were
-        // attached, restoring ours would silently disconnect them.
-        if (_borrowedOutput.sampleBufferDelegate == self) {
-            // AVFoundation requires (delegate != nil) == (queue != nil) and raises otherwise.
-            // _previousDelegate is weak, so it can be nil here even though _previousQueue is
-            // still very much alive.
-            id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = _previousDelegate;
-            [_borrowedOutput setSampleBufferDelegate:previous
-                                               queue:previous ? _previousQueue : nil];
-        }
-        // Under the lock: -captureOutput:... reads these on the capture queue, and a
-        // concurrent read of a __weak ivar while it is being written is an unsafe access to
-        // the weak table, not merely a stale value.
-        os_unfair_lock_lock(&_lock);
-        _borrowedOutput = nil;
-        _previousDelegate = nil;
-        _previousQueue = nil;
-        os_unfair_lock_unlock(&_lock);
-    }
-
-    if (_ownedOutput) {
-        AVCaptureSession *session = _session;
-        [_ownedOutput setSampleBufferDelegate:nil queue:NULL];
-        if (session) {
-            [session beginConfiguration];
-            [session removeOutput:_ownedOutput];
-            [session commitConfiguration];
-        }
-        _ownedOutput = nil;
-    }
-
-    os_unfair_lock_lock(&_lock);
     CVPixelBufferRef stale = _latest;
     _latest = NULL;
     os_unfair_lock_unlock(&_lock);
     if (stale) CVPixelBufferRelease(stale);
+
+    AVCaptureSession *session = _session;
+    @try
+    {
+        if (borrowed.sampleBufferDelegate == self)
+        {
+            [borrowed setSampleBufferDelegate:previous queue:previous ? previousQueue : nil];
+        }
+        if (owned)
+        {
+            [owned setSampleBufferDelegate:nil queue:NULL];
+            if ([session.outputs containsObject:owned])
+            {
+                [session beginConfiguration];
+                @try
+                {
+                    [session removeOutput:owned];
+                }
+                @finally
+                {
+                    [session commitConfiguration];
+                }
+            }
+        }
+    }
+    @finally
+    {
+        BOOL restored = borrowed.sampleBufferDelegate != self;
+        BOOL removed = ![session.outputs containsObject:owned];
+        os_unfair_lock_lock(&_lock);
+        if (restored)
+        {
+            _borrowedOutput = nil;
+            _previousDelegate = nil;
+            _previousQueue = nil;
+        }
+        if (removed)
+            _ownedOutput = nil;
+        os_unfair_lock_unlock(&_lock);
+    }
 }
 
 - (BOOL)hasFrame
@@ -198,9 +352,8 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     CVPixelBufferRef buffer = _latest ? CVPixelBufferRetain(_latest) : NULL;
     os_unfair_lock_unlock(&_lock);
     if (!buffer) return NULL;
-    CGImageRef image = RNSCCreateImageFromPixelBuffer(buffer);
-    CVPixelBufferRelease(buffer);
-    return image;
+    @try { return RNSCCreateImageFromPixelBuffer(buffer); }
+    @finally { CVPixelBufferRelease(buffer); }
 }
 
 - (CALayerContentsGravity)contentsGravity
@@ -210,12 +363,19 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
 
 - (CATransform3D)contentsTransform
 {
+    return [self contentsTransformForPreview:_previewLayer];
+}
+
+- (CATransform3D)contentsTransformForPreview:(AVCaptureVideoPreviewLayer *)previewLayer
+{
     // Sample buffers come out of the data output in the *capture* orientation, which is not
     // necessarily the orientation the preview layer is showing. Front cameras also mirror the
     // preview but not the buffers. Correct for the difference between the two connections;
     // when they already agree this collapses to the identity.
-    AVCaptureConnection *preview = _previewLayer.connection;
-    AVCaptureConnection *output = (_ownedOutput ?: _borrowedOutput).connections.firstObject;
+    AVCaptureConnection *preview = previewLayer.connection;
+    AVCaptureConnection *output = nil;
+    for (AVCaptureConnection *connection in (_ownedOutput ?: _borrowedOutput).connections)
+        if ([self matchesConnection:connection]) { output = connection; break; }
     if (!preview || !output) return CATransform3DIdentity;
 
     CGFloat angle = 0;
@@ -260,17 +420,23 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
            fromConnection:(AVCaptureConnection *)connection
 {
-    CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-    if (pixelBuffer) {
-        CVPixelBufferRetain(pixelBuffer);
-        os_unfair_lock_lock(&_lock);
-        CVPixelBufferRef stale = _latest;
-        _latest = pixelBuffer;
-        os_unfair_lock_unlock(&_lock);
-        if (stale) CVPixelBufferRelease(stale);
-    }
-
+    // Snapshot forwarding before processing; detach cannot replace the host for this callback.
     id<AVCaptureVideoDataOutputSampleBufferDelegate> previous = [self borrowedDelegate];
+    BOOL matchingConnection = [self matchesConnection:connection];
+    CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    CVPixelBufferRef stale = NULL;
+    os_unfair_lock_lock(&_lock);
+    // Teardown and publication share the lock: a callback cannot retain a frame after detach.
+    if (_attached && (output == _ownedOutput || output == _borrowedOutput) && pixelBuffer &&
+        matchingConnection)
+    {
+        stale = _latest;
+        _latest = CVPixelBufferRetain(pixelBuffer);
+    }
+    os_unfair_lock_unlock(&_lock);
+    if (stale)
+        CVPixelBufferRelease(stale);
+
     if ([previous respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
         [previous captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
     }
@@ -286,6 +452,83 @@ static CGFloat RNSCAngleForVideoOrientation(AVCaptureVideoOrientation orientatio
     }
 }
 
+@end
+
+@implementation RNSCCameraPresentation
+{
+    RNSCCameraFrameProvider *_source;
+    __weak AVCaptureVideoPreviewLayer *_preview;
+    __weak UIView *_view;
+    BOOL _attached;
+}
+@synthesize identifier = _identifier;
+- (instancetype)initWithSource:(RNSCCameraFrameProvider *)source
+                       preview:(AVCaptureVideoPreviewLayer *)preview
+                          view:(UIView *)view
+{
+    if ((self = [super init]))
+    {
+        _source = source;
+        _preview = preview;
+        _view = view;
+        _identifier = [NSString
+            stringWithFormat:@"camera:%p:view:%p:layer:%p", preview.session, view, preview];
+    }
+    return self;
+}
+- (void)dealloc
+{
+    [self detach];
+}
+- (UIView *)targetView
+{
+    return _view;
+}
+- (CALayer *)mediaLayer
+{
+    return _preview;
+}
+- (NSUInteger)attachmentGeneration { return _source.attachmentGeneration; }
+- (BOOL)isAlive
+{
+    return _view.window != nil && [_source matchesPreview:_preview];
+}
+- (void)attach
+{
+    if (!_attached)
+    {
+        _attached = YES;
+        [_source retainPresentation];
+    }
+    else
+        [_source attach];
+}
+- (void)detach
+{
+    if (_attached)
+    {
+        _attached = NO;
+        [_source releasePresentation];
+    }
+    else
+        [_source releasePresentationIfIdle];
+}
+- (BOOL)hasFrame
+{
+    return [_source hasFrame];
+}
+- (CGImageRef)newFrameImage
+{
+    return [_source newFrameImage];
+}
+- (CALayerContentsGravity)contentsGravity
+{
+    return RNSCContentsGravityForVideoGravity(_preview.videoGravity);
+}
+- (CATransform3D)contentsTransform
+{
+    return [_source contentsTransformForPreview:_preview];
+}
 @end
 
 #endif // !TARGET_OS_TV

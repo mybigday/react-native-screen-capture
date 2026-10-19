@@ -1,0 +1,140 @@
+package com.fugood.screencapture;
+
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/** Fake tiny bitmap/request boundaries; production continuation is extracted byte for byte. */
+public final class DisplayContinuationTest {
+    @interface Nullable {}
+    static final class Display { static final int DEFAULT_DISPLAY = 0; }
+    static final class ScreenCaptureAccessibilityService {}
+    static int checks;
+    static void check(boolean condition, String message) {
+        checks++;
+        if (!condition) throw new AssertionError(message);
+    }
+    static final class Bitmap {
+        final int width, height;
+        int recycles;
+        Bitmap(int width, int height) { this.width = width; this.height = height; }
+        int getWidth() { return width; }
+        int getHeight() { return height; }
+        boolean isRecycled() { return recycles != 0; }
+        void recycle() { if (++recycles != 1) throw new AssertionError("double recycle"); }
+    }
+    interface CaptureCallback { void onResult(Bitmap bitmap, String error); }
+    static final class Sink implements CaptureCallback {
+        int calls;
+        Bitmap bitmap;
+        String error;
+        boolean throwAfterAccept;
+        public void onResult(Bitmap bitmap, String error) {
+            if (++calls != 1) throw new AssertionError("double delivery");
+            this.bitmap = bitmap; this.error = error;
+            if (throwAfterAccept) throw new IllegalStateException("injected downstream failure after ownership");
+        }
+    }
+    static final List<CaptureCallback> pending = new ArrayList<>();
+    static int requests, failRequest;
+    static boolean failStitch;
+    static CaptureCallback last;
+    static void reset() { pending.clear(); requests = failRequest = 0; failStitch = false; last = null; }
+    static void takeScreenshot(ScreenCaptureAccessibilityService service, int display, int retries,
+                               CaptureCallback callback) {
+        requests++;
+        if (requests == failRequest) throw new IllegalStateException("injected request creation");
+        pending.add(callback); last = callback;
+    }
+    static Throwable deliver(Bitmap bitmap, String error) {
+        try { pending.remove(0).onResult(bitmap, error); return null; }
+        catch (Throwable failure) { return failure; }
+    }
+    static Bitmap stitch(List<Bitmap> parts) {
+        if (failStitch) throw new IllegalStateException("injected stitch boundary");
+        if (parts.isEmpty()) return null;
+        if (parts.size() == 1) return parts.get(0);
+        int width = 0, height = 0;
+        for (Bitmap part : parts) { width += part.width; height = Math.max(height, part.height); }
+        for (Bitmap part : parts) part.recycle();
+        return new Bitmap(width, height);
+    }
+
+    /* PRODUCTION_SEQUENCE */
+
+    public static void main(String[] args) {
+        ScreenCaptureAccessibilityService service = new ScreenCaptureAccessibilityService();
+
+        reset(); Sink addFailure = new Sink();
+        List<Bitmap> list = new ArrayList<>() {
+            @Override public boolean add(Bitmap bitmap) {
+                boolean added = super.add(bitmap);
+                if (size() == 2) throw new AssertionError("injected list growth failure");
+                return added;
+            }
+        };
+        captureDisplays(service, new int[] {0, 1}, 0, list, addFailure);
+        Bitmap first = new Bitmap(8, 4), second = new Bitmap(8, 4);
+        check(deliver(first, null) == null, "first display failed");
+        Throwable escaped = deliver(second, null);
+        check(escaped == null, "continuation allocation error escaped: " + escaped);
+        check(addFailure.calls == 1 && addFailure.bitmap == null && addFailure.error.contains("growth"),
+              "list growth failure did not deliver one error");
+        check(first.recycles == 1 && second.recycles == 1 && list.isEmpty(), "owned bitmaps retained/doubled");
+
+        reset(); failRequest = 2; Sink requestFailure = new Sink(); list = new ArrayList<>();
+        captureDisplays(service, new int[] {0, 1}, 0, list, requestFailure);
+        first = new Bitmap(8, 4);
+        check(deliver(first, null) == null, "next request creation escaped");
+        check(first.recycles == 1 && requestFailure.calls == 1 && requestFailure.bitmap == null && list.isEmpty(),
+              "next request failure did not clean/deliver once");
+        check(requestFailure.error.contains("request creation") && pending.isEmpty(), "failure reason/request retention");
+
+        reset(); failRequest = 1; Sink initialFailure = new Sink();
+        captureDisplays(service, new int[] {0}, 0, new ArrayList<>(), initialFailure);
+        check(initialFailure.calls == 1 && initialFailure.error.contains("request creation"), "initial request failure");
+
+        reset(); failStitch = true; Sink stitchFailure = new Sink(); list = new ArrayList<>();
+        captureDisplays(service, new int[] {0}, 0, list, stitchFailure);
+        first = new Bitmap(8, 4);
+        check(deliver(first, null) == null, "stitch failure escaped");
+        check(stitchFailure.calls == 1 && stitchFailure.bitmap == null && first.recycles == 1 && list.isEmpty(),
+              "stitch boundary did not clean owned frame");
+
+        reset(); Sink singleOwner = new Sink(); singleOwner.throwAfterAccept = true; list = new ArrayList<>();
+        captureDisplays(service, new int[] {0}, 0, list, singleOwner);
+        first = new Bitmap(8, 4);
+        check(deliver(first, null) instanceof IllegalStateException, "downstream throw should propagate after handoff");
+        check(singleOwner.calls == 1 && singleOwner.bitmap == first && first.recycles == 0 && list.isEmpty(),
+              "already encoder-owned single frame was recycled/redelivered");
+        first.recycle();
+
+        reset(); Sink multiOwner = new Sink(); multiOwner.throwAfterAccept = true; list = new ArrayList<>();
+        captureDisplays(service, new int[] {0, 1}, 0, list, multiOwner);
+        first = new Bitmap(8, 4); second = new Bitmap(8, 4);
+        check(deliver(first, null) == null, "first composition frame failed");
+        check(deliver(second, null) instanceof IllegalStateException, "composition downstream throw did not propagate");
+        check(multiOwner.calls == 1 && multiOwner.bitmap.recycles == 0 && first.recycles == 1 && second.recycles == 1 && list.isEmpty(),
+              "composed frame ownership or parts cleanup was wrong");
+        multiOwner.bitmap.recycle();
+
+        reset(); Sink rejectionThrows = new Sink(); rejectionThrows.throwAfterAccept = true;
+        captureDisplays(service, new int[] {0}, 0, new ArrayList<>(), rejectionThrows);
+        check(deliver(null, "primary failure") instanceof IllegalStateException, "failure callback throw did not propagate");
+        check(rejectionThrows.calls == 1, "failure callback was invoked twice");
+
+        reset(); Sink oversized = new Sink(); list = new ArrayList<>();
+        captureDisplays(service, new int[] {0}, 0, list, oversized);
+        first = new Bitmap(70000, 1000); // Metadata only, no image allocation.
+        check(deliver(first, null) == null && oversized.calls == 1 && oversized.bitmap == null && first.recycles == 1 && list.isEmpty(),
+              "over-budget image did not clean and reject");
+
+        reset(); Sink recovery = new Sink(); list = new ArrayList<>();
+        captureDisplays(service, new int[] {0, 1}, 0, list, recovery);
+        first = new Bitmap(8, 4);
+        check(deliver(first, null) == null && deliver(null, "secondary unavailable") == null, "secondary failure recovery");
+        check(recovery.calls == 1 && recovery.bitmap == first && first.recycles == 0 && list.isEmpty(), "healthy next sequence failed");
+        first.recycle();
+
+        System.out.println("{\"checks\":" + checks + ",\"passed\":true,\"scope\":\"extracted production display continuation; deterministic tiny metadata/request boundaries, no Android device\"}");
+    }
+}

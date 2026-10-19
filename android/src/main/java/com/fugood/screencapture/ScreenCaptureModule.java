@@ -4,11 +4,10 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Matrix;
+import android.net.Uri;
 import android.provider.Settings;
 import android.util.Base64;
-
 import androidx.annotation.Nullable;
-
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
@@ -17,19 +16,20 @@ import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.UiThreadUtil;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
-
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.io.IOException;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class ScreenCaptureModule extends ScreenCaptureSpec {
 
     public static final String NAME = "ScreenCapture";
 
-    private static final String FILE_PREFIX = "CAPTURE";
     private static final String EVENT_SCREENSHOT = "ScreenCapture";
     private static final String MODE_ACCESSIBILITY = "accessibility";
 
@@ -37,13 +37,27 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
     private static final String E_NO_ACTIVITY = "E_NO_ACTIVITY";
 
     private final ReactApplicationContext reactContext;
-    private final ExecutorService encoder = Executors.newSingleThreadExecutor();
+    // Shared ordering includes publication, promise settlement, and cleanup across bridge reloads.
+    private static final ThreadPoolExecutor encoder =
+        createEncoder(work -> new Thread(work, "rn-screen-capture-encoder"));
     private final ScreenshotDetector detector;
+    private static final AtomicBoolean captureInFlight = new AtomicBoolean();
+    private volatile boolean invalidated;
+    private final CaptureFiles files;
+
+    private static ThreadPoolExecutor createEncoder(ThreadFactory factory) {
+        // Accept the first task as worker-owned work instead of queuing it before worker creation.
+        ThreadPoolExecutor pool =
+            new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), factory);
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
 
     public ScreenCaptureModule(ReactApplicationContext reactContext) {
         super(reactContext);
         this.reactContext = reactContext;
         this.detector = new ScreenshotDetector(reactContext);
+        this.files = new CaptureFiles(reactContext.getCacheDir(), new AndroidCaptureFileIdentity());
     }
 
     @Override
@@ -53,6 +67,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
 
     @Override
     public void invalidate() {
+        invalidated = true;
         // stop() touches the legacy manager, which is main-thread only, and must not be allowed
         // to skip the rest of teardown if it throws.
         UiThreadUtil.runOnUiThread(new Runnable() {
@@ -64,7 +79,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                 }
             }
         });
-        encoder.shutdown();
+        // Queued work checks this instance's invalidation.
         super.invalidate();
     }
 
@@ -77,8 +92,8 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         final boolean excludeStatusBar =
             options.hasKey("excludeStatusBar") && options.getBoolean("excludeStatusBar");
         final String extension = options.hasKey("extension") ? options.getString("extension") : "png";
-        final int quality = Math.max(0, Math.min(100,
-            options.hasKey("quality") ? (int) options.getDouble("quality") : 100));
+        final double qualityValue = options.hasKey("quality") ? options.getDouble("quality") : 100;
+        final int quality = Math.max(0, Math.min(100, (int)qualityValue));
         final double scale = options.hasKey("scale") ? options.getDouble("scale") : 1d;
         final boolean includeBase64 =
             options.hasKey("includeBase64") && options.getBoolean("includeBase64");
@@ -96,11 +111,29 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         final boolean markUnsupported =
             options.hasKey("markUnsupported") && options.getBoolean("markUnsupported");
 
+        if (!Double.isFinite(scale) || scale <= 0 || !Double.isFinite(qualityValue)) {
+            promise.reject(E_CAPTURE, "scale must be finite and positive; quality must be finite");
+            return;
+        }
+        if (invalidated) {
+            promise.reject(E_CAPTURE, "Module is shutting down");
+            return;
+        }
+        if (!captureInFlight.compareAndSet(false, true)) {
+            promise.reject("E_CAPTURE_BUSY", "A capture is already in flight");
+            return;
+        }
+
         final CaptureCallback onBitmap = new CaptureCallback() {
             @Override
             public void onResult(@Nullable Bitmap bitmap, @Nullable String error) {
-                if (bitmap == null) {
-                    promise.reject(E_CAPTURE, error != null ? error : "Capture failed");
+                if (bitmap == null || invalidated) {
+                    if (bitmap != null)
+                        bitmap.recycle();
+                    captureInFlight.set(false);
+                    promise.reject(E_CAPTURE, invalidated
+                                                  ? "Module is shutting down"
+                                                  : (error != null ? error : "Capture failed"));
                     return;
                 }
                 encode(bitmap, extension, quality, scale, includeBase64, cropStatusBar, promise);
@@ -123,6 +156,7 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
 
         Activity activity = getCurrentActivity();
         if (activity == null) {
+            captureInFlight.set(false);
             promise.reject(E_NO_ACTIVITY, "No current activity");
             return;
         }
@@ -138,7 +172,10 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                 Bitmap bitmap = source;
                 WritableMap result = null;
                 Throwable failure = null;
+                File file = null;
                 try {
+                    if (invalidated)
+                        throw new IOException("Module is shutting down");
                     int top = cropStatusBar
                         ? WindowCapture.nominalStatusBarHeight(reactContext) : 0;
                     if (top < 0 || top >= source.getHeight()) top = 0;
@@ -150,8 +187,8 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                         if (resize) {
                             // Derive the matrix from clamped target dimensions: scaling by the
                             // raw factor can round a dimension to 0, which createBitmap rejects.
-                            int dstWidth = Math.max(1, (int) Math.round(srcWidth * scale));
-                            int dstHeight = Math.max(1, (int) Math.round(srcHeight * scale));
+                            int[] size = CaptureFiles.scaledSize(srcWidth, srcHeight, scale);
+                            int dstWidth = size[0], dstHeight = size[1];
                             matrix = new Matrix();
                             matrix.postScale((float) dstWidth / srcWidth,
                                              (float) dstHeight / srcHeight);
@@ -166,41 +203,46 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                     Bitmap.CompressFormat format = compressFormat(extension);
                     // Normalised so the URI suffix matches iOS, which always writes .jpg.
                     String suffix = format == Bitmap.CompressFormat.JPEG ? "jpg" : "png";
-                    File file = File.createTempFile(FILE_PREFIX, "." + suffix,
-                        reactContext.getCacheDir());
-
                     byte[] encoded = null;
                     if (includeBase64) {
-                        // Encode once and reuse the bytes for both the file and the string;
-                        // compressing twice doubles the cost of every base64 capture.
+                        // Reuse encoded bytes for the file and base64.
                         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                        bitmap.compress(format, quality, buffer);
+                        if (!bitmap.compress(format, quality, buffer))
+                            throw new IOException("Could not encode the image");
                         encoded = buffer.toByteArray();
                     }
 
-                    FileOutputStream out = new FileOutputStream(file);
-                    try {
-                        if (encoded != null) {
-                            out.write(encoded);
-                        } else {
-                            bitmap.compress(format, quality, out);
-                        }
-                        out.flush();
-                    } finally {
-                        out.close();
-                    }
-
                     result = Arguments.createMap();
-                    result.putString("uri", "file://" + file.getAbsolutePath());
                     result.putInt("width", bitmap.getWidth());
                     result.putInt("height", bitmap.getHeight());
                     if (encoded != null) {
                         result.putString("base64", Base64.encodeToString(encoded, Base64.NO_WRAP));
                     }
+                    final Bitmap outputBitmap = bitmap;
+                    final byte[] bytes = encoded;
+                    file = files.publish(suffix, output -> {
+                        if (bytes != null)
+                            output.write(bytes);
+                        else if (!outputBitmap.compress(format, quality, output))
+                            throw new IOException("Could not encode the image");
+                    });
+                    result.putString("uri", Uri.fromFile(file).toString());
+                    if (invalidated)
+                        throw new IOException("Module is shutting down");
                 } catch (Throwable t) {
                     failure = t;
                 } finally {
                     if (!bitmap.isRecycled()) bitmap.recycle();
+                    if (bitmap != source && !source.isRecycled())
+                        source.recycle();
+                    if (failure != null && file != null) {
+                        try {
+                            files.release(file.toURI().toString());
+                        } catch (IOException cleanup) {
+                            failure.addSuppressed(cleanup);
+                        }
+                    }
+                    captureInFlight.set(false);
                 }
                 // Outside the try: a throw out of resolve() must not come back round as a
                 // reject on the Promise it just settled.
@@ -211,13 +253,23 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                 }
             }
         };
+        submitEncode(source, work, promise);
+    }
+
+    private void submitEncode(final Bitmap source, final Runnable work, final Promise promise) {
+        final AtomicBoolean claimed = new AtomicBoolean();
+        final Runnable guarded = () -> {
+            if (claimed.compareAndSet(false, true)) work.run();
+        };
         try {
-            encoder.execute(work);
-        } catch (RejectedExecutionException e) {
-            // invalidate() shuts the encoder down. Without this the rejection would escape into
-            // the accessibility service's unguarded callback and the Promise would never settle.
+            encoder.execute(guarded);
+        } catch (Throwable error) {
+            // Cancel before removing queued work; a claimed worker owns cleanup and settlement.
+            if (!claimed.compareAndSet(false, true)) return;
+            encoder.remove(guarded);
             source.recycle();
-            promise.reject(E_CAPTURE, "Module is shutting down", e);
+            captureInFlight.set(false);
+            promise.reject(E_CAPTURE, "Could not start image encoder", error);
         }
     }
 
@@ -278,8 +330,16 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
             return;
         }
         // The service can only be switched on by the user, so all we can do is take them there.
-        openSettings();
-        promise.resolve("denied");
+        Throwable failure = null;
+        try {
+            openSettings();
+        } catch (Throwable error) {
+            failure = error;
+        }
+        if (failure != null)
+            promise.reject(E_CAPTURE, String.valueOf(failure.getMessage()), failure);
+        else
+            promise.resolve("denied");
     }
 
     @Override
@@ -345,12 +405,9 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
                 int removed = 0;
                 Throwable failure = null;
                 try {
-                    File[] files = reactContext.getCacheDir().listFiles();
-                    if (files != null) {
-                        for (File file : files) {
-                            if (file.getName().startsWith(FILE_PREFIX) && file.delete()) removed++;
-                        }
-                    }
+                    if (invalidated)
+                        throw new IOException("Module is shutting down");
+                    removed = files.clear();
                 } catch (Throwable t) {
                     failure = t;
                 }
@@ -366,8 +423,32 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
         try {
             encoder.execute(work);
         } catch (RejectedExecutionException e) {
-            // invalidate() shuts the encoder down.
+            // Executor submission can fail before work starts.
             promise.reject(E_CAPTURE, "Module is shutting down", e);
+        }
+    }
+
+    @Override
+    @ReactMethod
+    public void releaseCapture(final String uri, final Promise promise) {
+        try {
+            encoder.execute(() -> {
+                boolean removed = false;
+                Throwable failure = null;
+                try {
+                    if (invalidated)
+                        throw new IOException("Module is shutting down");
+                    removed = files.release(uri);
+                } catch (Throwable error) {
+                    failure = error;
+                }
+                if (failure != null)
+                    promise.reject(E_CAPTURE, String.valueOf(failure.getMessage()), failure);
+                else
+                    promise.resolve(removed);
+            });
+        } catch (RejectedExecutionException error) {
+            promise.reject(E_CAPTURE, "Module is shutting down", error);
         }
     }
 
@@ -385,6 +466,8 @@ public class ScreenCaptureModule extends ScreenCaptureSpec {
 
     private void startDetectionOnUiThread(final Promise promise) {
         try {
+            if (invalidated)
+                throw new IllegalStateException("Module is shutting down");
             detector.start(new ScreenshotDetector.Listener() {
                 @Override
                 public void onScreenshot(@Nullable String path) {

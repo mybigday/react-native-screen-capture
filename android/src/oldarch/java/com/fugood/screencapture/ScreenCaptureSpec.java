@@ -28,6 +28,8 @@ abstract class ScreenCaptureSpec extends ReactContextBaseJavaModule {
 
     public abstract void clearCache(Promise promise);
 
+    public abstract void releaseCapture(String uri, Promise promise);
+
     public abstract void startScreenshotDetection(Promise promise);
 
     public abstract void stopScreenshotDetection(Promise promise);

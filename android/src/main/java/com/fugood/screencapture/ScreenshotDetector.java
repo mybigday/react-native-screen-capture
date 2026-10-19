@@ -39,6 +39,7 @@ final class ScreenshotDetector implements LifecycleEventListener {
     }
 
     private final ReactApplicationContext context;
+    private long generation;
 
     @Nullable
     private Listener listener;
@@ -57,7 +58,16 @@ final class ScreenshotDetector implements LifecycleEventListener {
         stop();
         this.listener = listener;
         context.addLifecycleEventListener(this);
-        bind();
+        try {
+            bind();
+        } catch (Throwable error) {
+            try {
+                stop();
+            } catch (Throwable cleanup) {
+                error.addSuppressed(cleanup);
+            }
+            throw error;
+        }
     }
 
     void stop() {
@@ -82,7 +92,11 @@ final class ScreenshotDetector implements LifecycleEventListener {
             && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
         if (unbound || activityChanged || canUpgrade) {
             unbind();
-            bind();
+            try {
+                bind();
+            } catch (Throwable error) {
+                unbind();
+            }
         }
     }
 
@@ -106,11 +120,13 @@ final class ScreenshotDetector implements LifecycleEventListener {
 
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private boolean bindModern(final Activity activity) {
+        final long binding = generation;
         Activity.ScreenCaptureCallback pending = new Activity.ScreenCaptureCallback() {
             @Override
             public void onScreenCaptured() {
                 Listener current = listener;
-                if (current != null) current.onScreenshot(null);
+                if (current != null && generation == binding)
+                    current.onScreenshot(null);
             }
         };
         try {
@@ -130,18 +146,21 @@ final class ScreenshotDetector implements LifecycleEventListener {
     }
 
     private void bindLegacy() {
+        final long binding = generation;
         legacyManager = ScreenCapturetListenManager.newInstance(context, null);
         legacyManager.setListener(new ScreenCapturetListenManager.OnScreenCapturetListen() {
             @Override
             public void onShot(String imagePath) {
                 Listener current = listener;
-                if (current != null) current.onScreenshot(imagePath);
+                if (current != null && generation == binding)
+                    current.onScreenshot(imagePath);
             }
         });
         legacyManager.startListen();
     }
 
     private void unbind() {
+        generation++;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && callback != null) {
             Activity activity = registeredActivity != null ? registeredActivity.get() : null;
             if (activity != null) {
@@ -155,8 +174,9 @@ final class ScreenshotDetector implements LifecycleEventListener {
         registeredActivity = null;
         callback = null;
         if (legacyManager != null) {
-            legacyManager.stopListen();
+            ScreenCapturetListenManager previous = legacyManager;
             legacyManager = null;
+            previous.stopListen();
         }
     }
 }

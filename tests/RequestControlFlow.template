@@ -1,0 +1,123 @@
+package com.fugood.screencapture;
+
+import java.util.*;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/** Extracted production request state machine with deterministic Android API boundaries. */
+public class RequestControlFlowTest {
+    @interface RequiresApi { int value(); }
+    static class Build { static class VERSION_CODES { static final int R = 30; } }
+    static final int RETRY_DELAY_MS = 400;
+    static final Executor CAPTURE_EXECUTOR = Runnable::run;
+    static ScreenCaptureAccessibilityService instance;
+    static int checks;
+    static void check(boolean condition) { checks++; if (!condition) throw new AssertionError(checks); }
+    static String describeError(int code) { return "error " + code; }
+    static class Looper { static Looper getMainLooper() { return new Looper(); } }
+    static class Handler {
+        record Task(Runnable runnable, long due) {}
+        static List<Task> tasks = new ArrayList<>();
+        static long now;
+        Handler(Looper looper) {}
+        boolean postDelayed(Runnable work, long delay) { tasks.add(new Task(work, now + delay)); return true; }
+        void removeCallbacks(Runnable work) { tasks.removeIf(task -> task.runnable() == work); }
+        static void advance(long delta) {
+            now += delta;
+            for (;;) {
+                Task next = tasks.stream().filter(task -> task.due() <= now).findFirst().orElse(null);
+                if (next == null) return;
+                tasks.remove(next); next.runnable().run();
+            }
+        }
+        static void reset() { tasks.clear(); now = 0; }
+    }
+    static class HardwareBuffer {
+        int closes;
+        boolean failCopy;
+        void close() { closes++; }
+    }
+    static class Bitmap {
+        static int copies, wraps, recycled;
+        HardwareBuffer buffer;
+        enum Config { ARGB_8888 }
+        static Bitmap wrapHardwareBuffer(HardwareBuffer buffer, Object space) { wraps++; Bitmap b = new Bitmap(); b.buffer = buffer; return b; }
+        int getWidth() { return 8; }
+        int getHeight() { return 4; }
+        Bitmap copy(Config config, boolean mutable) {
+            copies++;
+            if (buffer.failCopy) throw new IllegalStateException("injected copy failure");
+            return new Bitmap();
+        }
+        void recycle() { recycled++; }
+    }
+    interface CaptureCallback { void onResult(Bitmap bitmap, String error); }
+    static class AccessibilityService {
+        static final int ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT = 3;
+        interface TakeScreenshotCallback { void onSuccess(ScreenshotResult result); void onFailure(int error); }
+        record ScreenshotResult(HardwareBuffer buffer) {
+            HardwareBuffer getHardwareBuffer() { return buffer; }
+            Object getColorSpace() { return null; }
+        }
+    }
+    static class ScreenCaptureAccessibilityService {
+        int calls;
+        int throwOnCall;
+        AccessibilityService.TakeScreenshotCallback callback;
+        void takeScreenshot(int display, Executor executor, AccessibilityService.TakeScreenshotCallback callback) {
+            calls++; this.callback = callback;
+            if (calls == throwOnCall) throw new IllegalStateException("injected binder exception");
+        }
+    }
+
+    /* PRODUCTION_REQUEST */
+
+    static class Result implements CaptureCallback {
+        int calls;
+        Bitmap bitmap;
+        String error;
+        public void onResult(Bitmap bitmap, String error) { calls++; this.bitmap = bitmap; this.error = error; }
+    }
+    static ScreenCaptureAccessibilityService fresh() {
+        Handler.reset(); Bitmap.copies = Bitmap.wraps = Bitmap.recycled = 0;
+        return instance = new ScreenCaptureAccessibilityService();
+    }
+    public static void main(String[] args) {
+        ScreenCaptureAccessibilityService service = fresh(); Result result = new Result();
+        ScreenshotRequest request = new ScreenshotRequest(service, 0, result); request.start(1);
+        HardwareBuffer buffer = new HardwareBuffer(); service.callback.onSuccess(new AccessibilityService.ScreenshotResult(buffer));
+        check(result.calls == 1 && result.bitmap != null && buffer.closes == 1 && Bitmap.copies == 1);
+        Handler.advance(5000); check(result.calls == 1 && Handler.tasks.isEmpty());
+
+        service = fresh(); result = new Result(); request = new ScreenshotRequest(service, 0, result); request.start(1);
+        Handler.advance(3000); check(result.calls == 1 && result.bitmap == null);
+        service.callback.onFailure(AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT);
+        Handler.advance(1000); check(service.calls == 1 && result.calls == 1);
+        buffer = new HardwareBuffer(); service.callback.onSuccess(new AccessibilityService.ScreenshotResult(buffer));
+        check(buffer.closes == 1 && Bitmap.copies == 0 && Bitmap.wraps == 0 && result.calls == 1);
+
+        service = fresh(); result = new Result(); request = new ScreenshotRequest(service, 0, result); request.start(1);
+        service.callback.onFailure(AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT);
+        Handler.advance(3000); check(result.calls == 1 && service.calls == 1 && Handler.tasks.isEmpty());
+
+        service = fresh(); service.throwOnCall = 2; result = new Result();
+        request = new ScreenshotRequest(service, 0, result); request.start(1);
+        service.callback.onFailure(AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT);
+        Handler.advance(400); check(service.calls == 2 && result.calls == 1 && result.error.contains("binder"));
+        Handler.advance(5000); check(result.calls == 1);
+
+        service = fresh(); result = new Result(); request = new ScreenshotRequest(service, 0, result); request.start(1);
+        service.callback.onFailure(AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT);
+        instance = null; Handler.advance(400); check(service.calls == 1 && result.calls == 1 && result.error.contains("disconnected"));
+
+        service = fresh(); result = new Result(); request = new ScreenshotRequest(service, 0, result); request.start(1);
+        buffer = new HardwareBuffer(); buffer.failCopy = true;
+        service.callback.onSuccess(new AccessibilityService.ScreenshotResult(buffer));
+        check(result.calls == 1 && result.bitmap == null && result.error.contains("copy") && buffer.closes == 1 && Bitmap.recycled == 1);
+
+        service = fresh(); service.throwOnCall = 1; result = new Result();
+        request = new ScreenshotRequest(service, 0, result); request.start(1);
+        check(result.calls == 1 && result.error.contains("binder") && Handler.tasks.isEmpty());
+        System.out.println("{\"checks\":" + checks + ",\"passed\":true,\"scope\":\"extracted production request control flow; deterministic API/clock stubs, no Android device\"}");
+    }
+}

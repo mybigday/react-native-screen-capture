@@ -1,0 +1,163 @@
+package com.fugood.screencapture;
+
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+/** No Android device, actual images, or real resource exhaustion. */
+public final class EncoderSubmissionTest {
+    private static final String E_CAPTURE = "E_CAPTURE";
+    private static final AtomicBoolean captureInFlight = new AtomicBoolean();
+    private final ThreadPoolExecutor encoder;
+    private static int checks;
+
+    EncoderSubmissionTest(ThreadPoolExecutor encoder) { this.encoder = encoder; }
+    static void check(boolean condition, String message) {
+        checks++;
+        if (!condition) throw new AssertionError(message);
+    }
+    static final class Bitmap {
+        int recycles;
+        synchronized void recycle() {
+            if (++recycles != 1) throw new AssertionError("bitmap recycled twice");
+        }
+    }
+    static final class Promise {
+        volatile int rejects, resolves;
+        final CountDownLatch done = new CountDownLatch(1);
+        synchronized void reject(String code, String message, Throwable error) {
+            rejects++;
+            if (rejects + resolves != 1) throw new AssertionError("promise settled twice");
+            done.countDown();
+        }
+        synchronized void resolve(Object value) {
+            resolves++;
+            if (rejects + resolves != 1) throw new AssertionError("promise settled twice");
+            done.countDown();
+        }
+    }
+
+    /* PRODUCTION_FACTORY */
+
+    /* PRODUCTION_SUBMISSION */
+
+    static ThreadFactory failOnce(Throwable failure) {
+        AtomicBoolean first = new AtomicBoolean(true);
+        return work -> {
+            if (first.getAndSet(false)) {
+                if (failure instanceof Error) throw (Error) failure;
+                throw (RuntimeException) failure;
+            }
+            return new Thread(work, "rnsc-encoder-probe");
+        };
+    }
+    static void shutdown(ThreadPoolExecutor pool) throws InterruptedException {
+        pool.shutdownNow();
+        if (!pool.awaitTermination(2, TimeUnit.SECONDS)) throw new AssertionError("worker remained live");
+    }
+    static void rejectedAndRecovered(ThreadPoolExecutor pool) throws Exception {
+        EncoderSubmissionTest module = new EncoderSubmissionTest(pool);
+        Bitmap first = new Bitmap(); Promise rejected = new Promise();
+        AtomicInteger firstRuns = new AtomicInteger();
+        captureInFlight.set(true);
+        Throwable escaped = null;
+        try { module.submitEncode(first, firstRuns::incrementAndGet, rejected); }
+        catch (Throwable error) { escaped = error; }
+        check(escaped == null, "submission failure escaped without cleanup: " + escaped);
+        check(rejected.rejects == 1 && rejected.resolves == 0, "failed job did not reject once");
+        check(first.recycles == 1 && !captureInFlight.get(), "failed job retained bitmap/admission");
+        check(pool.getQueue().isEmpty(), "failed job remained queued");
+
+        Bitmap second = new Bitmap(); Promise recovered = new Promise();
+        check(captureInFlight.compareAndSet(false, true), "next capture could not enter");
+        module.submitEncode(second, () -> {
+            second.recycle(); captureInFlight.set(false); recovered.resolve(null);
+        }, recovered);
+        check(recovered.done.await(2, TimeUnit.SECONDS), "next capture never ran");
+        check(recovered.resolves == 1 && second.recycles == 1, "next capture failed");
+        check(firstRuns.get() == 0 && first.recycles == 1 && rejected.rejects == 1,
+              "cancelled first job replayed after recovery");
+    }
+    static final class QueuingFailure extends ThreadPoolExecutor {
+        Runnable retained;
+        QueuingFailure() { super(0, 1, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), (ThreadFactory) Thread::new); }
+        @Override public void execute(Runnable command) {
+            retained = command;
+            getQueue().offer(command);
+            throw new IllegalStateException("injected after queue admission");
+        }
+    }
+    public static void main(String[] args) throws Exception {
+        // Prove the historical core-zero executor retains the first job on factory failure.
+        ThreadPoolExecutor old = new ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(), failOnce(new IllegalStateException("injected factory")));
+        try {
+            try { old.execute(() -> {}); throw new AssertionError("expected factory failure"); }
+            catch (IllegalStateException expected) { check(old.getQueue().size() == 1, "historical retain not reproduced"); }
+        } finally { shutdown(old); }
+
+        ThreadPoolExecutor production = createEncoder(failOnce(new IllegalStateException("injected factory")));
+        try {
+            rejectedAndRecovered(production);
+            check(production.getCorePoolSize() == 1 && production.allowsCoreThreadTimeOut(),
+                  "production worker must accept first task directly and expire when idle");
+        } finally { shutdown(production); }
+
+        // Also cancel a retained command if a no-worker/queue race reproduces the old topology.
+        ThreadPoolExecutor retained = new ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(), failOnce(new IllegalStateException("injected queued factory")));
+        try { rejectedAndRecovered(retained); } finally { shutdown(retained); }
+
+        ThreadPoolExecutor resourceError = createEncoder(failOnce(new AssertionError("injected allocation error")));
+        try { rejectedAndRecovered(resourceError); } finally { shutdown(resourceError); }
+
+        QueuingFailure late = new QueuingFailure();
+        try {
+            EncoderSubmissionTest module = new EncoderSubmissionTest(late);
+            Bitmap bitmap = new Bitmap(); Promise promise = new Promise(); AtomicInteger runs = new AtomicInteger();
+            captureInFlight.set(true);
+            module.submitEncode(bitmap, runs::incrementAndGet, promise);
+            check(late.getQueue().isEmpty(), "retained wrapper was not removed");
+            late.retained.run(); // Simulate a worker that already took the cancelled wrapper.
+            check(runs.get() == 0 && bitmap.recycles == 1 && promise.rejects == 1,
+                  "late cancelled wrapper ran/recycled/settled again");
+        } finally { shutdown(late); }
+
+        // If a worker already claimed the job, submission cleanup must not steal its bitmap.
+        CountDownLatch started = new CountDownLatch(1), finish = new CountDownLatch(1);
+        ThreadPoolExecutor running = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(), (ThreadFactory) Thread::new) {
+            @Override public void execute(Runnable command) {
+                super.execute(command);
+                try { if (!started.await(2, TimeUnit.SECONDS)) throw new AssertionError("worker did not start"); }
+                catch (InterruptedException error) { throw new AssertionError(error); }
+                throw new IllegalStateException("injected after worker ownership");
+            }
+        };
+        try {
+            EncoderSubmissionTest module = new EncoderSubmissionTest(running);
+            Bitmap bitmap = new Bitmap(); Promise promise = new Promise();
+            captureInFlight.set(true);
+            module.submitEncode(bitmap, () -> {
+                started.countDown();
+                try { finish.await(); } catch (InterruptedException error) { throw new AssertionError(error); }
+                bitmap.recycle(); captureInFlight.set(false); promise.resolve(null);
+            }, promise);
+            check(bitmap.recycles == 0 && promise.rejects == 0 && captureInFlight.get(),
+                  "submission failure stole a running job's ownership");
+            finish.countDown();
+            check(promise.done.await(2, TimeUnit.SECONDS) && promise.resolves == 1 && bitmap.recycles == 1,
+                  "running job did not complete once");
+        } finally { finish.countDown(); shutdown(running); }
+
+        CountDownLatch expired = new CountDownLatch(1), ran = new CountDownLatch(1);
+        ThreadPoolExecutor idle = createEncoder(work -> new Thread(() -> {
+            try { work.run(); } finally { expired.countDown(); }
+        }, "rnsc-idle-probe"));
+        try {
+            idle.setKeepAliveTime(10, TimeUnit.MILLISECONDS); // Accelerate the real idle-expiry boundary.
+            idle.execute(ran::countDown);
+            check(ran.await(2, TimeUnit.SECONDS) && expired.await(2, TimeUnit.SECONDS), "idle worker never expired");
+        } finally { shutdown(idle); }
+        System.out.println("{\"checks\":" + checks + ",\"passed\":true,\"scope\":\"extracted production encoder submission/factory; injected worker failures, no Android device\"}");
+    }
+}

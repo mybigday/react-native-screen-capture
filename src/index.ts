@@ -37,7 +37,7 @@ export type CaptureOptions = {
    * `all` (default) stitches every screen the app is showing on, side by side, in one image --
    * an app whose content lives on an external display is captured, not the empty window left
    * behind on the built-in one. `main` captures only the built-in screen. A numeric string
-   * selects one screen by index.
+   * selects a screen index on iOS, or a display ID on Android accessibility mode.
    *
    * Single-screen devices are unaffected: every value produces the same one screen.
    */
@@ -74,12 +74,25 @@ export type Subscription = { remove(): void }
 
 const EVENT_SCREENSHOT = 'ScreenCapture'
 
-// Tracked here rather than asked of the emitter: `ScreenCapture` is a bare global device event,
-// so emitter.listenerCount() also sees 1.x-era DeviceEventEmitter listeners and any second copy
-// of this package -- which would keep native detection running after our last subscriber left.
-// A set rather than a counter, so a subscription removed twice cannot drive the count past
-// zero and stop detection under a listener that is still subscribed.
+// Track this module's subscriptions independently of other emitter users.
 const active = new Set<object>()
+let detectionStarted = false
+let detectionWork: Promise<void> = Promise.resolve()
+
+// Serialize detection transitions; failed starts remain retryable.
+function reconcileDetection(): void {
+  detectionWork = detectionWork.then(async () => {
+    try {
+      if (active.size > 0 && !detectionStarted) {
+        await NativeScreenCapture.startScreenshotDetection()
+        detectionStarted = true
+      } else if (active.size === 0 && detectionStarted) {
+        await NativeScreenCapture.stopScreenshotDetection()
+        detectionStarted = false
+      }
+    } catch { /* A later subscription/foreground transition retries the operation. */ }
+  })
+}
 
 const emitter = new NativeEventEmitter(
   // The TurboModule object is a valid emitter target on the new architecture;
@@ -89,38 +102,26 @@ const emitter = new NativeEventEmitter(
 
 let defaultMode: CaptureMode = 'auto'
 
-// The accessibility service can only be switched on from system Settings, which means the app
-// was backgrounded in between. Caching the answer keeps a burst of captures from paying a
-// native round-trip each, which would otherwise sit in front of every single frame.
-// The promise, not the resolved value: a burst that starts in one tick would otherwise see a
-// null cache on every call and fire a round-trip each, which is what the cache is here to stop.
+// Share pending probes only; service availability can change while foreground.
 let accessibilityStatus: Promise<PermissionStatus> | null = null
 AppState.addEventListener('change', (state) => {
-  if (state === 'active') accessibilityStatus = null
+  if (state === 'active') {
+    accessibilityStatus = null
+    reconcileDetection()
+  }
 })
 
 async function resolveMode(mode: CaptureMode): Promise<'view' | 'accessibility'> {
   if (mode !== 'auto') return mode
   if (Platform.OS !== 'android') return 'view'
   if (accessibilityStatus === null) {
-    accessibilityStatus = (
+    const probe = (
       NativeScreenCapture.getPermissionStatus('accessibility') as Promise<PermissionStatus>
-    ).then(
-      (status) => {
-        // 'denied' also means "enabled, not bound yet", which is what the user sees for a
-        // moment after flipping the toggle and coming back. Caching that would pin `auto` to
-        // `view` for the rest of the foreground session.
-        if (status === 'denied') accessibilityStatus = null
-        return status
-      },
-      () => {
-        // Nor cache a failure. `auto` is the mode a caller picks so they never have to think
-        // about accessibility availability, so a failed probe falls back rather than rejecting
-        // the capture they actually asked for.
-        accessibilityStatus = null
-        return 'denied' as PermissionStatus
-      },
-    )
+    ).catch(() => 'denied' as PermissionStatus)
+    accessibilityStatus = probe
+    void probe.then(() => {
+      if (accessibilityStatus === probe) accessibilityStatus = null
+    })
   }
   return (await accessibilityStatus) === 'granted' ? 'accessibility' : 'view'
 }
@@ -135,10 +136,14 @@ export function getMode(): CaptureMode {
 }
 
 export async function capture(options: CaptureOptions = {}): Promise<CaptureResult> {
+  if (!Number.isFinite(options.scale ?? 1) || (options.scale ?? 1) <= 0) {
+    throw new Error('scale must be a finite positive number')
+  }
+  if (!Number.isFinite(options.quality ?? 100)) {
+    throw new Error('quality must be finite')
+  }
   const mode = await resolveMode(options.mode ?? defaultMode)
-  // Spread first, defaults after: rebuilding the object key by key dropped everything this
-  // union does not name, which once turned an A/B test into two identical runs. Unknown keys
-  // are the native side's business, not this function's.
+  // Preserve unknown native options; explicit values override defaults.
   const result = await NativeScreenCapture.capture({
     excludeStatusBar: false,
     extension: 'png',
@@ -187,6 +192,11 @@ export function clearCache(): Promise<number> {
   return NativeScreenCapture.clearCache()
 }
 
+/** Delete one result after its consumers finish. Returns false if it was already removed. */
+export function releaseCapture(uri: string): Promise<boolean> {
+  return NativeScreenCapture.releaseCapture(uri)
+}
+
 /** Fires when the *user* takes a screenshot. Does not fire for `capture()`. */
 export function addScreenshotListener(
   listener: (event: ScreenshotEvent) => void,
@@ -194,14 +204,12 @@ export function addScreenshotListener(
   const sub = emitter.addListener(EVENT_SCREENSHOT, listener)
   const token = {}
   active.add(token)
-  NativeScreenCapture.startScreenshotDetection().catch(() => {})
+  reconcileDetection()
   return {
     remove: () => {
       if (!active.delete(token)) return
       sub.remove()
-      if (active.size === 0) {
-        NativeScreenCapture.stopScreenshotDetection().catch(() => {})
-      }
+      reconcileDetection()
     },
   }
 }
@@ -225,6 +233,7 @@ export default {
   warmUp,
   coolDown,
   clearCache,
+  releaseCapture,
   addScreenshotListener,
   dumpHierarchy,
 }

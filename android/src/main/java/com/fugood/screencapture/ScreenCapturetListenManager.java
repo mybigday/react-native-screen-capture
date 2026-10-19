@@ -68,13 +68,19 @@ public class ScreenCapturetListenManager {
     /**
      * 已回调过的路径
      */
-    private final List<String> sHasCallbackPaths = new ArrayList<String>();
+    private static final class Session {
+        final long started = System.currentTimeMillis();
+        final List<String> paths = new ArrayList<>(); // observer-thread only
+        final OnScreenCapturetListen listener;
+        volatile boolean active = true;
+        Session(OnScreenCapturetListen listener) { this.listener = listener; }
+    }
+    private volatile Session currentSession;
 
     private Context mContext;
 
     private OnScreenCapturetListen mListener;
 
-    private long mStartListenTime;
 
     /**
      * 内部存储器内容观察者
@@ -125,29 +131,34 @@ public class ScreenCapturetListenManager {
     public void startListen() {
         assertInMainThread();
 
-        sHasCallbackPaths.clear();
+        if (currentSession != null)
+            return;
+        final Session session = new Session(mListener);
+        currentSession = session;
 
-        // 记录开始监听的时间戳
-        mStartListenTime = System.currentTimeMillis();
+        try {
+            // 创建内容观察者
+            mObserverThread = new HandlerThread("rnsc-screenshot-observer");
+            mObserverThread.start();
+            Handler observerHandler = new Handler(mObserverThread.getLooper());
+            mInternalObserver = new MediaContentObserver(
+                MediaStore.Images.Media.INTERNAL_CONTENT_URI, observerHandler, session);
+            mExternalObserver = new MediaContentObserver(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, observerHandler, session);
 
-        // 创建内容观察者
-        mObserverThread = new HandlerThread("rnsc-screenshot-observer");
-        mObserverThread.start();
-        Handler observerHandler = new Handler(mObserverThread.getLooper());
-        mInternalObserver = new MediaContentObserver(MediaStore.Images.Media.INTERNAL_CONTENT_URI, observerHandler);
-        mExternalObserver = new MediaContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, observerHandler);
-
-        // 注册内容观察者
-        mContext.getContentResolver().registerContentObserver(
-                MediaStore.Images.Media.INTERNAL_CONTENT_URI,
-                false,
-                mInternalObserver
-        );
-        mContext.getContentResolver().registerContentObserver(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                false,
-                mExternalObserver
-        );
+            // Register transactionally: failure of the second observer must remove the first.
+            mContext.getContentResolver().registerContentObserver(
+                MediaStore.Images.Media.INTERNAL_CONTENT_URI, false, mInternalObserver);
+            mContext.getContentResolver().registerContentObserver(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, false, mExternalObserver);
+        } catch (Throwable error) {
+            try {
+                stopListen();
+            } catch (Throwable cleanup) {
+                error.addSuppressed(cleanup);
+            }
+            throw error;
+        }
     }
 
     /**
@@ -156,6 +167,11 @@ public class ScreenCapturetListenManager {
     public void stopListen() {
         assertInMainThread();
 
+        Session session = currentSession;
+        currentSession = null;
+        if (session != null)
+            session.active = false;
+        mUiHandler.removeCallbacksAndMessages(null);
         // 注销内容观察者
         if (mInternalObserver != null) {
             try {
@@ -180,14 +196,14 @@ public class ScreenCapturetListenManager {
         }
 
         // 清空数据
-        mStartListenTime = 0;
-        sHasCallbackPaths.clear();
     }
 
     /**
      * 处理媒体数据库的内容改变
      */
-    private void handleMediaContentChange(Uri contentUri) {
+    private void handleMediaContentChange(Uri contentUri, Session session) {
+        if (!session.active)
+            return;
         Cursor cursor = null;
         try {
             // 数据改变时查询数据库中最后加入的一条数据
@@ -234,15 +250,22 @@ public class ScreenCapturetListenManager {
             }
 
             // 处理获取到的第一行数据
-            handleMediaRowData(data, dateTaken, width, height);
+            handleMediaRowData(data, dateTaken, width, height, session);
 
         } catch (Exception e) {
             e.printStackTrace();
 
         } finally {
-            if (cursor != null && !cursor.isClosed()) {
-                cursor.close();
-            }
+            closeCursor(cursor);
+        }
+    }
+
+    private static void closeCursor(Cursor cursor) {
+        try {
+            if (cursor != null && !cursor.isClosed()) cursor.close();
+        } catch (Exception error) {
+            // Provider cleanup must not escape the observer Looper or replace a query failure.
+            Log.w("ScreenCapture", "Could not close screenshot query", error);
         }
     }
 
@@ -256,37 +279,27 @@ public class ScreenCapturetListenManager {
     /**
      * 处理获取到的一行数据
      */
-    private void handleMediaRowData(String data, long dateTaken, int width, int height) {
-        if (checkScreenShot(data, dateTaken, width, height)) {
-            Log.e("ScreenCapture","ScreenShot: path = " + data + "; size = " + width + " * " + height
-                    + "; date = " + dateTaken);
-            if (mListener != null && !checkCallback(data)) {
-                // The query above runs on the observer thread; the listener does not.
-                final OnScreenCapturetListen listener = mListener;
-                final String path = data;
-                mUiHandler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        listener.onShot(path);
-                    }
-                });
-            }
-        } else {
-            // 如果在观察区间媒体数据库有数据改变，又不符合截屏规则，则输出到 log 待分析
-            Log.e("ScreenCapture","Media content changed, but not screenshot: path = " + data
-                    + "; size = " + width + " * " + height + "; date = " + dateTaken);
+    private void handleMediaRowData(String data, long dateTaken, int width, int height,
+                                    Session session) {
+        if (session.active && checkScreenShot(data, dateTaken, width, height, session) &&
+            session.listener != null && !checkCallback(data, session)) {
+            mUiHandler.post(() -> {
+                if (session.active && currentSession == session)
+                    session.listener.onShot(data);
+            });
         }
     }
 
     /**
      * 判断指定的数据行是否符合截屏条件
      */
-    private boolean checkScreenShot(String data, long dateTaken, int width, int height) {
+    private boolean checkScreenShot(String data, long dateTaken, int width, int height,
+                                    Session session) {
         /*
          * 判断依据一: 时间判断
          */
         // 如果加入数据库的时间在开始监听之前, 或者与当前时间相差大于10秒, 则认为当前没有截屏
-        if (dateTaken < mStartListenTime || (System.currentTimeMillis() - dateTaken) > 10 * 1000) {
+        if (dateTaken < session.started || (System.currentTimeMillis() - dateTaken) > 10 * 1000) {
             return false;
         }
 
@@ -332,17 +345,17 @@ public class ScreenCapturetListenManager {
      * 判断是否已回调过, 某些手机ROM截屏一次会发出多次内容改变的通知; <br/>
      * 删除一个图片也会发通知, 同时防止删除图片时误将上一张符合截屏规则的图片当做是当前截屏.
      */
-    private boolean checkCallback(String imagePath) {
-        if (sHasCallbackPaths.contains(imagePath)) {
+    private boolean checkCallback(String imagePath, Session session) {
+        if (session.paths.contains(imagePath)) {
             return true;
         }
         // 大概缓存15~20条记录便可
-        if (sHasCallbackPaths.size() >= 20) {
+        if (session.paths.size() >= 20) {
             for (int i = 0; i < 5; i++) {
-                sHasCallbackPaths.remove(0);
+                session.paths.remove(0);
             }
         }
-        sHasCallbackPaths.add(imagePath);
+        session.paths.add(imagePath);
         return false;
     }
 
@@ -380,6 +393,7 @@ public class ScreenCapturetListenManager {
      * 设置截屏监听器
      */
     public void setListener(OnScreenCapturetListen listener) {
+        assertInMainThread();
         mListener = listener;
     }
 
@@ -404,16 +418,18 @@ public class ScreenCapturetListenManager {
     private class MediaContentObserver extends ContentObserver {
 
         private Uri mContentUri;
+        private final Session session;
 
-        public MediaContentObserver(Uri contentUri, Handler handler) {
+        public MediaContentObserver(Uri contentUri, Handler handler, Session session) {
             super(handler);
             mContentUri = contentUri;
+            this.session = session;
         }
 
         @Override
         public void onChange(boolean selfChange) {
             super.onChange(selfChange);
-            handleMediaContentChange(mContentUri);
+            handleMediaContentChange(mContentUri, session);
         }
     }
 
