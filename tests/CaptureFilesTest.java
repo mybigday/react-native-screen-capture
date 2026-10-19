@@ -57,6 +57,27 @@ public final class CaptureFilesTest {
         writer.start(); writerEntered.await(); cleanup.start(); unblock.countDown(); writer.join(); cleanup.join();
         if (failure.get() != null) throw new AssertionError(failure.get());
         check(folder.list().length == 0);
+        // Pending identity read fails (EIO) right after createTempFile: no residue is left.
+        File eioRoot = Files.createTempDirectory("rnsc-files-eio-").toFile();
+        CaptureFiles eio = new CaptureFiles(eioRoot, new CaptureFiles.IdentityChecker() {
+            final JvmCaptureFileIdentity real = new JvmCaptureFileIdentity();
+            @Override public Object pathKey(File file) throws IOException {
+                if (file.getName().endsWith(".pending")) throw new IOException("EIO injected");
+                return real.pathKey(file);
+            }
+            @Override public Object openedKey(java.io.FileOutputStream out, File file) throws IOException {
+                return real.openedKey(out, file);
+            }
+        });
+        rejects(() -> eio.publish("png", out -> out.write(1)), "EIO injected");
+        check(new File(eioRoot, "react-native-screen-capture").list().length == 0);
+        // Symlinked cache ancestors are normal (API 24-29: /data/user/0 -> /data/data).
+        File realData = new File(root, "data"); check(realData.mkdir());
+        File userLink = new File(root, "user0"); Files.createSymbolicLink(userLink.toPath(), realData.toPath());
+        CaptureFiles linked = new CaptureFiles(new File(userLink, "cache"));
+        File linkedImage = linked.publish("png", out -> out.write(1));
+        check(linkedImage.exists()); check(linked.release(linkedImage.toURI().toString()));
+        linked.publish("jpg", out -> out.write(1)); check(linked.clear() == 1);
         check(CaptureFiles.scaledSize(8, 4, 0.001)[0] == 1);
         for (double scale : new double[] { 0, -1, Double.NaN, Double.POSITIVE_INFINITY, Double.MAX_VALUE, 100000 }) {
             rejects(() -> CaptureFiles.scaledSize(1080, 2340, scale), "invalid");

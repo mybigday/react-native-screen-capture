@@ -24,7 +24,7 @@ python3 tests/extract-observer-cursor-probe.py
 javac --release 17 -d tests/out/cursor tests/out/ObserverCursorTest.java
 java -cp tests/out/cursor com.fugood.screencapture.ObserverCursorTest
 python3 tests/extract-pixelcopy-probe.py
-javac --release 17 -d tests/out/pixelcopy android/src/main/java/com/fugood/screencapture/PixelCopyBudget.java tests/out/PixelCopyBudgetTest.java
+javac --release 17 -d tests/out/pixelcopy android/src/main/java/com/fugood/screencapture/CaptureFiles.java android/src/main/java/com/fugood/screencapture/PixelCopyBudget.java tests/out/PixelCopyBudgetTest.java
 java -cp tests/out/pixelcopy com.fugood.screencapture.PixelCopyBudgetTest
 javac --release 17 -d tests/out/identity android/src/main/java/com/fugood/screencapture/CaptureFiles.java tests/JvmCaptureFileIdentity.java tests/IdentityPublicationProbe.java tests/DirectoryReplacementProbe.java tests/PreOpenReplacementProbe.java
 java -cp tests/out/identity com.fugood.screencapture.IdentityPublicationProbe

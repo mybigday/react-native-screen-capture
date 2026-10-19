@@ -108,15 +108,43 @@ static BOOL RNSCOperationRunning;
 
 + (UIWindow *)primaryWindowForWindows:(NSArray<UIWindow *> *)windows
 {
-    // Back-to-front drawing order must not let a tiny auxiliary window define the viewport.
+    // A key window defines the viewport only when it fills its scene (or screen); a key toast,
+    // panel or sheet window must not crop the capture. Otherwise the largest window wins.
     for (UIWindow *window in windows)
-        if (window.isKeyWindow) return window;
+    {
+        if (!window.isKeyWindow) continue;
+        CGRect extent = window.windowScene ? window.windowScene.coordinateSpace.bounds
+                                           : window.screen.bounds;
+        if (CGSizeEqualToSize(window.bounds.size, extent.size))
+            return window;
+    }
     UIWindow *primary = windows.firstObject;
     for (UIWindow *window in windows)
         if (window.bounds.size.width * window.bounds.size.height >
             primary.bounds.size.width * primary.bounds.size.height)
             primary = window;
     return primary;
+}
+
++ (NSArray<UIWindow *> *)flattenWindowGroups:(NSArray<NSArray<UIWindow *> *> *)groups
+{
+    NSMutableArray<UIWindow *> *allWindows = [NSMutableArray array];
+    double totalPixels = 0;
+    for (NSArray<UIWindow *> *group in groups)
+    {
+        [allWindows addObjectsFromArray:group];
+        UIWindow *primary = [self primaryWindowForWindows:group];
+        double width = primary.bounds.size.width * primary.screen.scale;
+        double height = primary.bounds.size.height * primary.screen.scale;
+        if (!isfinite(width) || !isfinite(height) || width <= 0 || height <= 0)
+        {
+            [NSException raise:@"CaptureDimensions" format:@"Invalid window dimensions"];
+        }
+        totalPixels += width * height;
+    }
+    if (totalPixels > RNSCMaxCapturePixels)
+        [NSException raise:@"CaptureDimensions" format:@"Capture exceeds 64 megapixels"];
+    return allWindows;
 }
 
 + (void)captureNowExcludingStatusBar:(BOOL)excludeStatusBar
@@ -126,11 +154,10 @@ static BOOL RNSCOperationRunning;
 {
     @try
     {
-        NSArray<NSArray<UIWindow *> *> *groups = [self windowGroupsForSelector:screenSelector];
-        NSMutableArray<UIWindow *> *allWindows = [NSMutableArray array];
-        for (NSArray<UIWindow *> *group in groups)
-            [allWindows addObjectsFromArray:group];
-        if (allWindows.count == 0)
+        NSArray<NSArray<UIWindow *> *> *initialGroups =
+            [self windowGroupsForSelector:screenSelector];
+        NSArray<UIWindow *> *initialWindows = [self flattenWindowGroups:initialGroups];
+        if (initialWindows.count == 0)
         {
             completion(
                 nil, [NSError errorWithDomain:kErrorDomain
@@ -141,31 +168,7 @@ static BOOL RNSCOperationRunning;
 
         RNSCProviderRegistry *registry = RNSCProviderRegistry.sharedRegistry;
         NSArray<id<RNSCFrameProvider>> *providers =
-            [registry attachedProvidersForWindows:allWindows];
-
-        NSMutableArray<NSValue *> *bounds = [NSMutableArray array];
-        NSMutableArray *screens = [NSMutableArray array];
-        NSMutableArray<UIWindow *> *primaryWindows = [NSMutableArray array];
-        double totalPixels = 0;
-        for (UIWindow *window in allWindows)
-        {
-            [bounds addObject:[NSValue valueWithCGRect:window.bounds]];
-            [screens addObject:window.windowScene.screen ?: window.screen];
-        }
-        for (NSArray<UIWindow *> *group in groups)
-        {
-            UIWindow *primary = [self primaryWindowForWindows:group];
-            [primaryWindows addObject:primary];
-            double width = primary.bounds.size.width * primary.screen.scale;
-            double height = primary.bounds.size.height * primary.screen.scale;
-            if (!isfinite(width) || !isfinite(height) || width <= 0 || height <= 0)
-            {
-                [NSException raise:@"CaptureDimensions" format:@"Invalid window dimensions"];
-            }
-            totalPixels += width * height;
-        }
-        if (totalPixels > 64000000)
-            [NSException raise:@"CaptureDimensions" format:@"Capture exceeds 64 megapixels"];
+            [registry attachedProvidersForWindows:initialWindows];
 
         [self waitForFrames:providers
                     attempt:0
@@ -182,25 +185,28 @@ static BOOL RNSCOperationRunning;
                                for (id<RNSCFrameProvider> provider in providers) {
                                    [generations addObject:@([provider respondsToSelector:@selector(attachmentGeneration)] ? provider.attachmentGeneration : 0)];
                                }
-                               NSArray *currentGroups =
+                               // Window churn during the wait (keyboard, alert, rotation) does
+                               // not invalidate the media frame: render the current windows.
+                               NSArray<NSArray<UIWindow *> *> *groups =
                                    [self windowGroupsForSelector:screenSelector];
-                               BOOL unchanged = [groups isEqual:currentGroups];
-                               for (NSUInteger i = 0; i < groups.count; i++)
-                                   unchanged = unchanged &&
-                                       [self primaryWindowForWindows:groups[i]] == primaryWindows[i];
-                               for (NSUInteger i = 0; i < allWindows.count; i++)
+                               NSArray<UIWindow *> *allWindows = [self flattenWindowGroups:groups];
+                               if (allWindows.count == 0)
                                {
-                                   unchanged = unchanged &&
-                                               CGRectEqualToRect(allWindows[i].bounds,
-                                                                 bounds[i].CGRectValue) &&
-                                               (allWindows[i].windowScene.screen
-                                                    ?: allWindows[i].screen) == screens[i];
+                                   [registry scheduleIdleDetach];
+                                   completion(nil, [NSError errorWithDomain:kErrorDomain
+                                                                       code:404
+                                                                   userInfo:@{
+                                                                       NSLocalizedDescriptionKey :
+                                                                           @"No visible window"
+                                                                   }]);
+                                   return;
                                }
+                               BOOL unchanged = YES;
                                for (id<RNSCFrameProvider> provider in providers)
                                    unchanged = unchanged && provider.isAlive;
                                if (unchanged)
                                {
-                                   // Revalidate providers after waiting, even when windows are unchanged.
+                                   // The waited-for providers must still be exactly the attached ones.
                                    NSArray *currentProviders =
                                        [registry attachedProvidersForWindows:allWindows];
                                    unchanged = [providers isEqual:currentProviders];
@@ -218,8 +224,8 @@ static BOOL RNSCOperationRunning;
                                                              code:409
                                                          userInfo:@{
                                                              NSLocalizedDescriptionKey :
-                                                                 @"Windows changed while waiting "
-                                                                 @"for a media frame; retry capture"
+                                                                 @"Media providers changed while "
+                                                                 @"waiting for a frame; retry capture"
                                                          }]);
                                    return;
                                }
@@ -363,7 +369,7 @@ static BOOL RNSCOperationRunning;
         height = MAX(height, (CGFloat)CGImageGetHeight(cg));
     }
 
-    if (!isfinite(width * height) || width * height > 64000000)
+    if (!isfinite(width * height) || width * height > RNSCMaxCapturePixels)
     {
         [NSException raise:@"CaptureDimensions" format:@"Stitched capture exceeds 64 megapixels"];
     }
@@ -530,12 +536,13 @@ static BOOL RNSCOperationRunning;
     CGRect bounds = primary.bounds;
 
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    format.opaque = NO;
+    // Opaque like the display, scaleImage and composeImages: PNG alpha must not depend on
+    // scale or screen count. Windows still composite over each other in draw order.
+    format.opaque = YES;
     format.scale = primary.screen.scale;
 
     UIGraphicsImageRenderer *renderer =
         [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size format:format];
-    // Preserve underlying content through transparent overlays.
     __block BOOL drawSucceeded = YES;
     image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
         for (UIWindow *window in windows)

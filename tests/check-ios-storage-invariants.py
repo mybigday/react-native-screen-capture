@@ -58,6 +58,7 @@ c_source = r'''
 #include <unistd.h>
 #include <fcntl.h>
 typedef bool BOOL;
+static const double RNSCMaxCapturePixels = 64000000;
 #define YES true
 #define NO false
 #define MAX(a,b) ((a) > (b) ? (a) : (b))

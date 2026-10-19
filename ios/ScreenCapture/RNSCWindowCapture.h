@@ -7,6 +7,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/** Largest bitmap, single or stitched, any capture path may allocate. */
+static const double RNSCMaxCapturePixels = 64000000;
+
 @interface RNSCWindowCapture : NSObject
 
 /**

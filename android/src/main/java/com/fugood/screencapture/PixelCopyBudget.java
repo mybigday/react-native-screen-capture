@@ -2,7 +2,7 @@ package com.fugood.screencapture;
 
 /** Process-wide limit for destinations which PixelCopy can still write into. */
 final class PixelCopyBudget {
-    static final long MAX_PIXELS = 64_000_000L;
+    static final long MAX_PIXELS = CaptureFiles.MAX_PIXELS;
     private static long outstandingPixels;
 
     private PixelCopyBudget() {}

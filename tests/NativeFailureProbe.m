@@ -29,9 +29,23 @@ static NSError *RNSCExceptionError(NSException *exception) {
 - (CGFloat)scale { return 1; }
 @end
 
+@interface UIScreen : NSObject
+@property(nonatomic) CGRect bounds;
+@end
+@implementation UIScreen @end
+@interface UIWindowScene : NSObject
+@property(nonatomic, strong) UIScreen *screen;
+@property(nonatomic) CGRect bounds;
+@property(nonatomic, readonly) UIWindowScene *coordinateSpace;
+@end
+@implementation UIWindowScene
+- (UIWindowScene *)coordinateSpace { return self; }
+@end
 @interface UIWindow : NSObject
 @property(nonatomic) BOOL isKeyWindow;
 @property(nonatomic) CGRect bounds;
+@property(nonatomic, strong) UIWindowScene *windowScene;
+@property(nonatomic, strong) UIScreen *screen;
 @end
 @implementation UIWindow @end
 
@@ -267,9 +281,22 @@ int main(void) { @autoreleasepool {
     UIWindow *tiny = [UIWindow new]; tiny.bounds = CGRectMake(0, 0, 1, 1);
     UIWindow *main = [UIWindow new]; main.bounds = CGRectMake(0, 0, 414, 896);
     UIWindow *large = [UIWindow new]; large.bounds = CGRectMake(0, 0, 800, 900);
+    UIScreen *phone = [UIScreen new]; phone.bounds = CGRectMake(0, 0, 414, 896);
+    UIWindowScene *scene = [UIWindowScene new]; scene.screen = phone; scene.bounds = phone.bounds;
+    tiny.windowScene = scene; main.windowScene = scene; large.screen = phone;
     main.isKeyWindow = YES;
     check([RNSCWindowCapture primaryWindowForWindows:@[tiny, main, large]] == main);
     main.isKeyWindow = NO;
+    // A key toast/panel window does not crop the full-screen app window.
+    tiny.isKeyWindow = YES;
+    check([RNSCWindowCapture primaryWindowForWindows:@[main, tiny]] == main);
+    // iPad Split View: the key app window fills its scene, not the screen.
+    UIScreen *pad = [UIScreen new]; pad.bounds = CGRectMake(0, 0, 1024, 1366);
+    UIWindowScene *split = [UIWindowScene new]; split.screen = pad; split.bounds = CGRectMake(0, 0, 507, 1366);
+    UIWindow *app = [UIWindow new]; app.bounds = split.bounds; app.windowScene = split; app.isKeyWindow = YES;
+    UIWindow *effects = [UIWindow new]; effects.bounds = split.bounds; effects.windowScene = split;
+    check([RNSCWindowCapture primaryWindowForWindows:@[effects, app]] == app);
+    tiny.isKeyWindow = NO;
     check([RNSCWindowCapture primaryWindowForWindows:@[tiny, main, large]] == large);
     check([RNSCWindowCapture primaryWindowForWindows:@[main, tiny]] == main);
     check([RNSCWindowCapture primaryWindowForWindows:@[tiny]] == tiny);

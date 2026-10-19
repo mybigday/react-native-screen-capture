@@ -245,7 +245,7 @@ public class ScreenCaptureAccessibilityService extends AccessibilityService {
                     long pixels = 0;
                     for (Bitmap part : collected)
                         pixels += (long)part.getWidth() * part.getHeight();
-                    if (pixels > 64000000) {
+                    if (pixels > CaptureFiles.MAX_PIXELS) {
                         throw new IllegalArgumentException("Captured displays exceed 64 megapixels");
                     }
                 }

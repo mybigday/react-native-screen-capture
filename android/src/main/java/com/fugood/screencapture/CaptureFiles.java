@@ -17,13 +17,18 @@ final class CaptureFiles {
         Object pathKey(File file) throws IOException;
         Object openedKey(FileOutputStream output, File path) throws IOException;
     }
+    /** Largest bitmap, single or stitched, any capture path may allocate. */
+    static final long MAX_PIXELS = 64_000_000L;
+    private static final String FOLDER = "react-native-screen-capture";
+    private final File cache;
     private final File directory;
     private final IdentityChecker identity;
 
     CaptureFiles(File cache) { this(cache, null); }
 
     CaptureFiles(File cache, IdentityChecker identity) {
-        directory = new File(cache, "react-native-screen-capture");
+        this.cache = cache;
+        directory = new File(cache, FOLDER);
         this.identity = identity;
     }
 
@@ -33,7 +38,7 @@ final class CaptureFiles {
 
     private File publishLocked(String extension, Writer writer) throws IOException {
         if ((!directory.mkdirs() && !directory.isDirectory()) ||
-            !directory.getCanonicalFile().equals(directory.getAbsoluteFile())) {
+            !directory.getCanonicalFile().equals(canonicalDirectory())) {
             throw new IOException("Capture cache is not a regular directory");
         }
         Object directoryKey = requiredPathKey(directory);
@@ -75,7 +80,13 @@ final class CaptureFiles {
         } finally {
             if (!published) {
                 for (File candidate : new File[] {pending, completed}) {
-                    try { removeMatchingFile(candidate, pendingKey); }
+                    try {
+                        // No key means identity failed right after createTempFile; drop the
+                        // pending file under clear()'s rule rather than leaving it behind.
+                        if (identity != null && pendingKey == null && candidate == pending) {
+                            if (pending.exists()) removePendingFile(pending);
+                        } else removeMatchingFile(candidate, pendingKey);
+                    }
                     catch (IOException | RuntimeException | Error cleanup) {
                         if (failure != null) failure.addSuppressed(cleanup);
                         else throw cleanup;
@@ -104,6 +115,11 @@ final class CaptureFiles {
         if (!file.delete()) throw new IOException("Could not remove failed capture " + file.getName());
     }
 
+    private void removePendingFile(File file) throws IOException {
+        if (!file.isFile() || !isCanonicalChild(file) || !file.delete())
+            throw new IOException("Could not remove failed capture " + file.getName());
+    }
+
     boolean release(String uri) throws IOException {
         synchronized (CaptureFiles.class) { return releaseLocked(uri); }
     }
@@ -116,7 +132,7 @@ final class CaptureFiles {
             throw new IOException("URI is not a capture owned by this module", error);
         }
         if (!directory.getAbsoluteFile().equals(file.getParentFile()) ||
-            !ownsName(file.getName()) || !file.getCanonicalFile().equals(file)) {
+            !ownsName(file.getName()) || !isCanonicalChild(file)) {
             throw new IOException("URI is not a capture owned by this module");
         }
         if (!file.exists())
@@ -133,7 +149,7 @@ final class CaptureFiles {
     private int clearLocked() throws IOException {
         if (!directory.exists())
             return 0;
-        if (!directory.getCanonicalFile().equals(directory.getAbsoluteFile()))
+        if (!directory.getCanonicalFile().equals(canonicalDirectory()))
             throw new IOException("Capture cache is a link");
         File[] files = directory.listFiles();
         if (files == null)
@@ -146,10 +162,7 @@ final class CaptureFiles {
                 continue;
             try {
                 if (pending) {
-                    if (!file.isFile() || !file.getCanonicalFile().equals(file.getAbsoluteFile()) ||
-                        !file.delete()) {
-                        throw new IOException("Could not remove failed capture " + file.getName());
-                    }
+                    removePendingFile(file);
                     removed++;
                 } else if (release(file.toURI().toString()))
                     removed++;
@@ -164,6 +177,16 @@ final class CaptureFiles {
         return removed;
     }
 
+    // Only the folder and its entries may not be links; cache ancestors can be (API 24-29
+    // getCacheDir() is under /data/user/0, a link to /data/data).
+    private File canonicalDirectory() throws IOException {
+        return new File(cache.getCanonicalFile(), FOLDER);
+    }
+
+    private boolean isCanonicalChild(File file) throws IOException {
+        return file.getCanonicalFile().equals(new File(canonicalDirectory(), file.getName()));
+    }
+
     private static boolean ownsName(String name) {
         return name.matches(
             "CAPTURE-[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\\.(png|jpg)");
@@ -173,7 +196,7 @@ final class CaptureFiles {
         double w = Math.max(1, Math.round(width * scale));
         double h = Math.max(1, Math.round(height * scale));
         if (!Double.isFinite(scale) || scale <= 0 || !Double.isFinite(w * h) ||
-            w > Integer.MAX_VALUE || h > Integer.MAX_VALUE || w * h > 64000000) {
+            w > Integer.MAX_VALUE || h > Integer.MAX_VALUE || w * h > MAX_PIXELS) {
             throw new IllegalArgumentException(
                 "Scaled capture exceeds 64 megapixels or scale is invalid");
         }

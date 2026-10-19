@@ -23,18 +23,22 @@ static BOOL RNSCScaledPixelDimensions(double width, double height, double scale,
     width = fmax(1.0, round(width * scale));
     height = fmax(1.0, round(height * scale));
     if (!isfinite(width) || !isfinite(height) || width > INT_MAX || height > INT_MAX ||
-        width * height > 64000000) return NO;
+        width * height > RNSCMaxCapturePixels) return NO;
     *pixelWidth = width;
     *pixelHeight = height;
     return YES;
 }
 
+static NSError *RNSCExceptionErrorWithFallback(NSException *exception, NSString *fallback)
+{
+    return [NSError errorWithDomain:@"com.fugood.screencapture"
+                               code:500
+                           userInfo:@{NSLocalizedDescriptionKey : exception.reason ?: fallback}];
+}
+
 static NSError *RNSCExceptionError(NSException *exception)
 {
-    return [NSError
-        errorWithDomain:@"com.fugood.screencapture"
-                   code:500
-               userInfo:@{NSLocalizedDescriptionKey : exception.reason ?: @"Capture failed"}];
+    return RNSCExceptionErrorWithFallback(exception, @"Capture failed");
 }
 
 static NSString *const kEventScreenshot = @"ScreenCapture";
@@ -223,10 +227,7 @@ RCT_EXPORT_METHOD(capture:(NSDictionary *)options
             }
         } @catch (NSException *exception) {
             result = nil;
-            failure = [NSError
-                errorWithDomain:@"com.fugood.screencapture"
-                           code:500
-                       userInfo:@{NSLocalizedDescriptionKey : exception.reason ?: @"Capture failed"}];
+            failure = RNSCExceptionError(exception);
         }
         @try
         {
@@ -354,12 +355,7 @@ RCT_EXPORT_METHOD(isModeAvailable:(NSString *)mode
         }
         @catch (NSException *exception)
         {
-            error = [NSError errorWithDomain:@"com.fugood.screencapture"
-                                        code:500
-                                    userInfo:@{
-                                        NSLocalizedDescriptionKey : exception.reason
-                                            ?: @"Provider operation failed"
-                                    }];
+            error = RNSCExceptionErrorWithFallback(exception, @"Provider operation failed");
         }
         @finally
         {
@@ -506,12 +502,7 @@ RCT_EXPORT_METHOD(dumpHierarchy:(RCTPromiseResolveBlock)resolve
         }
         @catch (NSException *exception)
         {
-            failure = [NSError
-                errorWithDomain:@"com.fugood.screencapture"
-                           code:500
-                       userInfo:@{
-                           NSLocalizedDescriptionKey : exception.reason ?: @"Discovery failed"
-                       }];
+            failure = RNSCExceptionErrorWithFallback(exception, @"Discovery failed");
         }
         if (failure)
         {
@@ -539,12 +530,7 @@ RCT_EXPORT_METHOD(dumpHierarchy:(RCTPromiseResolveBlock)resolve
                 }
                 @catch (NSException *exception)
                 {
-                    error = [NSError errorWithDomain:@"com.fugood.screencapture"
-                                                code:500
-                                            userInfo:@{
-                                                NSLocalizedDescriptionKey : exception.reason
-                                                    ?: @"Provider diagnostic failed"
-                                            }];
+                    error = RNSCExceptionErrorWithFallback(exception, @"Provider diagnostic failed");
                 }
                 @finally
                 {
