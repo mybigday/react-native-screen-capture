@@ -536,9 +536,10 @@ static BOOL RNSCOperationRunning;
     CGRect bounds = primary.bounds;
 
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    // Opaque like the display, scaleImage and composeImages: PNG alpha must not depend on
-    // scale or screen count. Windows still composite over each other in draw order.
-    format.opaque = YES;
+    // Not opaque: in an opaque context a transparent overlay window drawn after the primary one
+    // (UITextEffectsWindow, present once any text input has been used) blanks everything under
+    // it to black, while every draw still reports success.
+    format.opaque = NO;
     format.scale = primary.screen.scale;
 
     UIGraphicsImageRenderer *renderer =
